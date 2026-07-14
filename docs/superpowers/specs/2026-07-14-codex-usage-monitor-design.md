@@ -148,6 +148,8 @@
 
 Codex 日志可能包含同一任务的累计 Token 快照。实现不得直接相加所有累计快照。优先使用事件中的单次 Token 用量；若只有累计快照，则以同一任务上一次已处理累计值计算非负差值。
 
+总 Token 以日志中的 `total_tokens` 为权威值。`input_tokens`、`cached_input_tokens`、`output_tokens` 和 `reasoning_output_tokens` 只作为明细，不重新相加推导总量，以避免不同日志版本中缓存或推理 Token 被重复计算。
+
 若任务累计值下降，视为任务重置或日志轮换：记录新的基线，不产生负 Token，也不重复计入旧值。
 
 ### 7.2 时间范围
