@@ -6,3 +6,7 @@ DerivedData/
 xcuserdata/
 .superpowers/
 .worktrees/
+dist/
+outputs/
+*.app/
+*.zip
