@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import CodexUsageMonitor
 
@@ -50,6 +51,42 @@ struct NotificationCoordinatorTests {
         #expect(await sender.sentThresholds == [20, 10, 20, 10])
     }
 
+    @Test func coordinatorRebuildPreservesReceiptAndNewResetStillSends() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appending(path: "NotificationRebuildTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let sessionsRoot = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sessionsRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let logURL = sessionsRoot.appending(path: "limits.jsonl")
+        try Data(notificationLimitLog(reset: 2_000).utf8).write(to: logURL)
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let watcher = SessionFileWatcher(roots: [sessionsRoot])
+        let ingestion = IngestionCoordinator(
+            roots: [sessionsRoot],
+            repository: repository,
+            scanner: scanner,
+            watcher: watcher
+        )
+        let sender = NotificationSenderSpy()
+        let notifier = NotificationCoordinator(repository: repository, sender: sender)
+
+        await ingestion.start()
+        await notifier.evaluate(try await notificationLimitStatuses(repository: repository))
+        #expect(await sender.sentThresholds == [20])
+
+        try await ingestion.rebuildIndex()
+        await notifier.evaluate(try await notificationLimitStatuses(repository: repository))
+        #expect(await sender.sentThresholds == [20])
+
+        try appendNotificationLimit(reset: 4_000, to: logURL)
+        await ingestion.rescanAll()
+        await notifier.evaluate(try await notificationLimitStatuses(repository: repository))
+        #expect(await sender.sentThresholds == [20, 20])
+
+        await ingestion.stop()
+    }
+
     @Test func disabledSenderDoesNoWork() async throws {
         let database = try TemporaryNotificationDatabase()
         try await database.repository.migrate()
@@ -65,6 +102,35 @@ struct NotificationCoordinatorTests {
         ])
 
         #expect(await sender.attemptedThresholds.isEmpty)
+    }
+
+    @Test func notificationPolicySupportsOffOnlyTwentyOnlyTenAndBoth() async throws {
+        let policies: [(enabled: Bool, thresholds: Set<Int>, expected: [Int])] = [
+            (false, [20, 10], []),
+            (true, [20], [20]),
+            (true, [10], [10]),
+            (true, [20, 10], [20, 10]),
+        ]
+
+        for (index, policy) in policies.enumerated() {
+            let database = try TemporaryNotificationDatabase()
+            try await database.repository.migrate()
+            let sender = NotificationSenderSpy(
+                enabled: policy.enabled,
+                enabledThresholds: policy.thresholds
+            )
+            let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+
+            await coordinator.evaluate([
+                LimitStatus(
+                    window: .fiveHours,
+                    usedPercent: 91,
+                    resetsAt: Date(timeIntervalSince1970: Double(20_000 + index))
+                ),
+            ])
+
+            #expect(await sender.sentThresholds == policy.expected)
+        }
     }
 
     @Test func sendFailureDoesNotWriteReceiptAndCanRetry() async throws {
@@ -118,7 +184,7 @@ struct NotificationCoordinatorTests {
             await coordinator.evaluate([limit])
         }
         #expect(await eventually { await sender.isWaitingToSend })
-        try await database.repository.resetIndex()
+        try removeNotificationReceiptSchema(at: database.url)
         await sender.resumeSend()
         await firstEvaluation.value
 
@@ -234,22 +300,80 @@ struct NotificationCoordinatorTests {
         #expect(await sender.isEnabled())
         #expect(await center.authorizationRequestCount == 1)
     }
+
+    @Test func preferencesPersistTotalAndThresholdChoicesAcrossReopen() async throws {
+        let suiteName = "NotificationPreferencesTests-\(UUID().uuidString)"
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        defer { UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName) }
+        let first = UserDefaultsNotificationPreferences(
+            defaults: try #require(UserDefaults(suiteName: suiteName))
+        )
+
+        #expect(await !first.isEnabled())
+        #expect(await first.isThresholdEnabled(20))
+        #expect(await first.isThresholdEnabled(10))
+        await first.setEnabled(true)
+        await first.setThresholdEnabled(false, threshold: 20)
+
+        let reopened = UserDefaultsNotificationPreferences(
+            defaults: try #require(UserDefaults(suiteName: suiteName))
+        )
+        #expect(await reopened.isEnabled())
+        #expect(await !reopened.isThresholdEnabled(20))
+        #expect(await reopened.isThresholdEnabled(10))
+    }
+
+    @Test func turningOffDoesNotPromptAndDeniedExplicitReenableStaysOff() async throws {
+        let preferences = NotificationPreferencesSpy(enabled: true)
+        let center = UserNotificationCenterSpy(authorizationResults: [false])
+        let sender = UserNotificationSender(center: center, preferences: preferences)
+
+        await sender.setEnabled(false)
+        #expect(await !sender.isEnabled())
+        #expect(await center.authorizationRequestCount == 0)
+
+        #expect(try await !sender.requestAuthorization())
+        #expect(await !sender.isEnabled())
+        #expect(await center.authorizationRequestCount == 1)
+    }
 }
 
 private actor NotificationSenderSpy: NotificationSending {
-    private let enabled: Bool
+    private var enabled: Bool
+    private var enabledThresholds: Set<Int>
     private var sendFailures: Int
     private(set) var attemptedThresholds: [Int] = []
     private(set) var sentThresholds: [Int] = []
 
-    init(enabled: Bool = true, sendFailures: Int = 0) {
+    init(
+        enabled: Bool = true,
+        enabledThresholds: Set<Int> = [20, 10],
+        sendFailures: Int = 0
+    ) {
         self.enabled = enabled
+        self.enabledThresholds = enabledThresholds
         self.sendFailures = sendFailures
     }
 
     func isEnabled() async -> Bool { enabled }
 
+    func setEnabled(_ enabled: Bool) async {
+        self.enabled = enabled
+    }
+
     func requestAuthorization() async throws -> Bool { true }
+
+    func isThresholdEnabled(_ threshold: Int) async -> Bool {
+        enabledThresholds.contains(threshold)
+    }
+
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async {
+        if enabled {
+            enabledThresholds.insert(threshold)
+        } else {
+            enabledThresholds.remove(threshold)
+        }
+    }
 
     func send(title: String, body: String, threshold: Int) async throws {
         attemptedThresholds.append(threshold)
@@ -276,6 +400,10 @@ private actor GatedNotificationSender: NotificationSending {
 
     func isEnabled() async -> Bool { true }
 
+    func setEnabled(_ enabled: Bool) async {}
+
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async {}
+
     func requestAuthorization() async throws -> Bool { true }
 
     func send(title: String, body: String, threshold: Int) async throws {
@@ -301,15 +429,29 @@ private actor GatedNotificationSender: NotificationSending {
 
 private actor NotificationPreferencesSpy: NotificationPreferenceStoring {
     private var enabled: Bool
+    private var enabledThresholds: Set<Int>
 
-    init(enabled: Bool) {
+    init(enabled: Bool, enabledThresholds: Set<Int> = [20, 10]) {
         self.enabled = enabled
+        self.enabledThresholds = enabledThresholds
     }
 
     func isEnabled() async -> Bool { enabled }
 
     func setEnabled(_ enabled: Bool) async {
         self.enabled = enabled
+    }
+
+    func isThresholdEnabled(_ threshold: Int) async -> Bool {
+        enabledThresholds.contains(threshold)
+    }
+
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async {
+        if enabled {
+            enabledThresholds.insert(threshold)
+        } else {
+            enabledThresholds.remove(threshold)
+        }
     }
 }
 
@@ -348,6 +490,57 @@ private final class TemporaryNotificationDatabase {
 }
 
 private struct NotificationTestFailure: Error {}
+
+private struct NotificationSQLiteFixtureFailure: Error {
+    let code: Int32
+}
+
+private func removeNotificationReceiptSchema(at url: URL) throws {
+    var handle: OpaquePointer?
+    let openResult = sqlite3_open_v2(
+        url.path,
+        &handle,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+        nil
+    )
+    guard openResult == SQLITE_OK, let handle else {
+        throw NotificationSQLiteFixtureFailure(code: openResult)
+    }
+    defer { sqlite3_close(handle) }
+    let result = sqlite3_exec(
+        handle,
+        "DROP TABLE notification_receipts; PRAGMA user_version = 0;",
+        nil,
+        nil,
+        nil
+    )
+    guard result == SQLITE_OK else {
+        throw NotificationSQLiteFixtureFailure(code: result)
+    }
+}
+
+private func notificationLimitLog(reset: Int) -> String {
+    """
+    {"timestamp":"2026-07-15T03:00:00Z","type":"session_meta","payload":{"id":"notification-rebuild","cwd":"/synthetic/notification-rebuild"}}
+    {"timestamp":"2026-07-15T03:00:01Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":81,"window_minutes":300,"resets_at":\(reset)}}}}
+    """ + "\n"
+}
+
+private func appendNotificationLimit(reset: Int, to url: URL) throws {
+    let line = """
+    {"timestamp":"2026-07-15T03:00:02Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":81,"window_minutes":300,"resets_at":\(reset)}}}}
+    """ + "\n"
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(line.utf8))
+}
+
+private func notificationLimitStatuses(repository: UsageRepository) async throws -> [LimitStatus] {
+    try await repository.latestLimits().map {
+        LimitStatus(window: $0.window, usedPercent: $0.usedPercent, resetsAt: $0.resetsAt)
+    }
+}
 
 private func eventually(
     attempts: Int = 100,

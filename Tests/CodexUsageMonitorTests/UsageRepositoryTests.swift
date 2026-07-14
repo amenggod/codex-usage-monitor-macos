@@ -136,6 +136,24 @@ struct UsageRepositoryTests {
     }
 
     @Test
+    func futureSchemaRecoveryPreservesNotificationReceipts() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        try await repository.markNotificationSent(
+            "five-hours|2000|20",
+            sentAt: Date(timeIntervalSince1970: 1_000)
+        )
+        try setUserVersion(99, at: databaseURL)
+
+        try await repository.migrate()
+
+        #expect(try await repository.notificationWasSent("five-hours|2000|20"))
+        #expect(try await repository.queryUsage(from: nil, to: .distantFuture).isEmpty)
+    }
+
+    @Test
     func laterLimitObservationWins() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }
@@ -381,6 +399,21 @@ struct UsageRepositoryTests {
         }
         bytes.replaceSubrange(pageStart..<pageEnd, with: repeatElement(UInt8(0), count: pageSize))
         try bytes.write(to: url, options: .atomic)
+    }
+
+    private func setUserVersion(_ version: Int, at url: URL) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not open version fixture")
+        }
+        defer { sqlite3_close(handle) }
+        try executeRawSQL("PRAGMA user_version = \(version)", handle: handle)
     }
 
     private func executeRawSQL(_ sql: String, handle: OpaquePointer) throws {

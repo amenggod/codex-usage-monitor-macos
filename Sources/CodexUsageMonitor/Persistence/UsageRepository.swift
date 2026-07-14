@@ -424,7 +424,6 @@ actor UsageRepository {
     func resetIndex() throws {
         try database.execute("BEGIN IMMEDIATE")
         do {
-            try database.execute("DROP TABLE IF EXISTS notification_receipts")
             try database.execute("DROP TABLE IF EXISTS rate_limits")
             try database.execute("DROP TABLE IF EXISTS cumulative_usage")
             try database.execute("DROP TABLE IF EXISTS file_cursors")

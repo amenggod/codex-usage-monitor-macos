@@ -5,11 +5,20 @@ import SwiftUI
 @Observable
 final class SettingsViewState {
     private let launchAtLogin: any LaunchAtLoginServicing
+    private let notificationSender: any NotificationSending
     private(set) var isLaunchAtLoginEnabled: Bool
     private(set) var launchAtLoginError: String?
+    private(set) var notificationsEnabled = false
+    private(set) var twentyPercentNotificationsEnabled = true
+    private(set) var tenPercentNotificationsEnabled = true
+    private(set) var notificationMessage: String?
 
-    init(launchAtLogin: any LaunchAtLoginServicing) {
+    init(
+        launchAtLogin: any LaunchAtLoginServicing,
+        notificationSender: any NotificationSending
+    ) {
         self.launchAtLogin = launchAtLogin
+        self.notificationSender = notificationSender
         isLaunchAtLoginEnabled = launchAtLogin.isEnabled
     }
 
@@ -24,15 +33,49 @@ final class SettingsViewState {
             launchAtLoginError = error.localizedDescription
         }
     }
+
+    func loadNotificationSettings() async {
+        notificationsEnabled = await notificationSender.isEnabled()
+        twentyPercentNotificationsEnabled = await notificationSender.isThresholdEnabled(20)
+        tenPercentNotificationsEnabled = await notificationSender.isThresholdEnabled(10)
+    }
+
+    func setNotificationsEnabled(_ enabled: Bool) async {
+        notificationMessage = nil
+        if enabled {
+            do {
+                let granted = try await notificationSender.requestAuthorization()
+                notificationsEnabled = granted
+                notificationMessage = granted ? "通知已启用" : "未授予通知权限"
+            } catch {
+                notificationsEnabled = await notificationSender.isEnabled()
+                notificationMessage = error.localizedDescription
+            }
+        } else {
+            await notificationSender.setEnabled(false)
+            notificationsEnabled = await notificationSender.isEnabled()
+            notificationMessage = notificationsEnabled ? "无法关闭通知" : "通知已关闭"
+        }
+    }
+
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async {
+        await notificationSender.setThresholdEnabled(enabled, threshold: threshold)
+        let stored = await notificationSender.isThresholdEnabled(threshold)
+        switch threshold {
+        case 20:
+            twentyPercentNotificationsEnabled = stored
+        case 10:
+            tenPercentNotificationsEnabled = stored
+        default:
+            break
+        }
+    }
 }
 
 @MainActor
 struct SettingsView: View {
     let model: UsageViewModel
-    private let notificationSender: any NotificationSending
     @State private var state: SettingsViewState
-    @State private var notificationsEnabled = false
-    @State private var notificationMessage: String?
 
     init(
         model: UsageViewModel,
@@ -40,8 +83,10 @@ struct SettingsView: View {
         notificationSender: any NotificationSending = UserNotificationSender()
     ) {
         self.model = model
-        self.notificationSender = notificationSender
-        _state = State(initialValue: SettingsViewState(launchAtLogin: launchAtLogin))
+        _state = State(initialValue: SettingsViewState(
+            launchAtLogin: launchAtLogin,
+            notificationSender: notificationSender
+        ))
     }
 
     var body: some View {
@@ -58,17 +103,13 @@ struct SettingsView: View {
             }
 
             Section("通知") {
-                LabeledContent("低用量提醒") {
-                    Text(notificationsEnabled ? "已启用" : "未启用")
-                        .foregroundStyle(.secondary)
-                }
-                if !notificationsEnabled {
-                    Button("启用通知") {
-                        Task { await requestNotificationAuthorization() }
-                    }
-                }
-                if let notificationMessage {
-                    Text(notificationMessage)
+                Toggle("低用量提醒", isOn: notificationsEnabledBinding)
+                Toggle("剩余低于 20%", isOn: twentyPercentBinding)
+                    .disabled(!state.notificationsEnabled)
+                Toggle("剩余低于 10%", isOn: tenPercentBinding)
+                    .disabled(!state.notificationsEnabled)
+                if let message = state.notificationMessage {
+                    Text(message)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -83,7 +124,7 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding()
         .task {
-            notificationsEnabled = await notificationSender.isEnabled()
+            await state.loadNotificationSettings()
         }
     }
 
@@ -94,14 +135,30 @@ struct SettingsView: View {
         )
     }
 
-    private func requestNotificationAuthorization() async {
-        do {
-            let granted = try await notificationSender.requestAuthorization()
-            notificationsEnabled = granted
-            notificationMessage = granted ? "通知已启用" : "未授予通知权限"
-        } catch {
-            notificationsEnabled = false
-            notificationMessage = error.localizedDescription
-        }
+    private var notificationsEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { state.notificationsEnabled },
+            set: { enabled in
+                Task { await state.setNotificationsEnabled(enabled) }
+            }
+        )
+    }
+
+    private var twentyPercentBinding: Binding<Bool> {
+        Binding(
+            get: { state.twentyPercentNotificationsEnabled },
+            set: { enabled in
+                Task { await state.setThresholdEnabled(enabled, threshold: 20) }
+            }
+        )
+    }
+
+    private var tenPercentBinding: Binding<Bool> {
+        Binding(
+            get: { state.tenPercentNotificationsEnabled },
+            set: { enabled in
+                Task { await state.setThresholdEnabled(enabled, threshold: 10) }
+            }
+        )
     }
 }

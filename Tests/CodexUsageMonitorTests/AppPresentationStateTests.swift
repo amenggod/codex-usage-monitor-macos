@@ -18,7 +18,10 @@ struct AppPresentationStateTests {
     @MainActor
     @Test func launchAtLoginFailureRollsBackAndSurfacesError() {
         let service = LaunchAtLoginServiceSpy(enabled: false, enableFailure: "无法启用")
-        let state = SettingsViewState(launchAtLogin: service)
+        let state = SettingsViewState(
+            launchAtLogin: service,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false)
+        )
 
         state.setLaunchAtLoginEnabled(true)
 
@@ -30,7 +33,10 @@ struct AppPresentationStateTests {
     @MainActor
     @Test func successfulLaunchAtLoginChangeClearsPreviousError() {
         let service = LaunchAtLoginServiceSpy(enabled: false, enableFailure: "首次失败")
-        let state = SettingsViewState(launchAtLogin: service)
+        let state = SettingsViewState(
+            launchAtLogin: service,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false)
+        )
         state.setLaunchAtLoginEnabled(true)
         service.enableFailure = nil
 
@@ -52,6 +58,60 @@ struct AppPresentationStateTests {
         #expect(await eventually {
             model.snapshot.freshness == .failed("无法打开用量数据库")
         })
+    }
+
+    @MainActor
+    @Test func notificationToggleOffDoesNotPromptAndShowsMessage() async {
+        let sender = PresentationNotificationSenderSpy(enabled: true)
+        let state = SettingsViewState(
+            launchAtLogin: LaunchAtLoginServiceSpy(enabled: false),
+            notificationSender: sender
+        )
+        await state.loadNotificationSettings()
+
+        await state.setNotificationsEnabled(false)
+
+        #expect(!state.notificationsEnabled)
+        #expect(state.notificationMessage == "通知已关闭")
+        #expect(await sender.authorizationRequestCount == 0)
+        await state.loadNotificationSettings()
+        #expect(await sender.authorizationRequestCount == 0)
+    }
+
+    @MainActor
+    @Test func deniedNotificationToggleRollsBackAndShowsMessage() async {
+        let sender = PresentationNotificationSenderSpy(
+            enabled: false,
+            authorizationResults: [false]
+        )
+        let state = SettingsViewState(
+            launchAtLogin: LaunchAtLoginServiceSpy(enabled: false),
+            notificationSender: sender
+        )
+        await state.loadNotificationSettings()
+
+        await state.setNotificationsEnabled(true)
+
+        #expect(!state.notificationsEnabled)
+        #expect(state.notificationMessage == "未授予通知权限")
+        #expect(await sender.authorizationRequestCount == 1)
+    }
+
+    @MainActor
+    @Test func notificationThresholdTogglesPersistThroughInjectedSender() async {
+        let sender = PresentationNotificationSenderSpy(enabled: true)
+        let state = SettingsViewState(
+            launchAtLogin: LaunchAtLoginServiceSpy(enabled: false),
+            notificationSender: sender
+        )
+        await state.loadNotificationSettings()
+
+        await state.setThresholdEnabled(false, threshold: 20)
+
+        #expect(!state.twentyPercentNotificationsEnabled)
+        #expect(state.tenPercentNotificationsEnabled)
+        #expect(await !sender.isThresholdEnabled(20))
+        #expect(await sender.isThresholdEnabled(10))
     }
 }
 
@@ -95,6 +155,53 @@ private actor RuntimeStarterSpy: AppRuntimeStarting {
     func start() async {
         startCount += 1
     }
+}
+
+private actor PresentationNotificationSenderSpy: NotificationSending {
+    private var enabled: Bool
+    private var enabledThresholds: Set<Int>
+    private var authorizationResults: [Bool]
+    private(set) var authorizationRequestCount = 0
+
+    init(
+        enabled: Bool,
+        enabledThresholds: Set<Int> = [20, 10],
+        authorizationResults: [Bool] = []
+    ) {
+        self.enabled = enabled
+        self.enabledThresholds = enabledThresholds
+        self.authorizationResults = authorizationResults
+    }
+
+    func isEnabled() async -> Bool { enabled }
+
+    func setEnabled(_ enabled: Bool) async {
+        self.enabled = enabled
+    }
+
+    func isThresholdEnabled(_ threshold: Int) async -> Bool {
+        enabledThresholds.contains(threshold)
+    }
+
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async {
+        if enabled {
+            enabledThresholds.insert(threshold)
+        } else {
+            enabledThresholds.remove(threshold)
+        }
+    }
+
+    func requestAuthorization() async throws -> Bool {
+        authorizationRequestCount += 1
+        guard !authorizationResults.isEmpty else {
+            throw PresentationTestFailure(message: "未配置授权结果")
+        }
+        let granted = authorizationResults.removeFirst()
+        enabled = granted
+        return granted
+    }
+
+    func send(title: String, body: String, threshold: Int) async throws {}
 }
 
 @MainActor

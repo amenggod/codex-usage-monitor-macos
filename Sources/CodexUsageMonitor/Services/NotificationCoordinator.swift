@@ -3,13 +3,24 @@ import UserNotifications
 
 protocol NotificationSending: Sendable {
     func isEnabled() async -> Bool
+    func setEnabled(_ enabled: Bool) async
+    func isThresholdEnabled(_ threshold: Int) async -> Bool
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async
     func requestAuthorization() async throws -> Bool
     func send(title: String, body: String, threshold: Int) async throws
+}
+
+extension NotificationSending {
+    func isThresholdEnabled(_ threshold: Int) async -> Bool {
+        threshold == 20 || threshold == 10
+    }
 }
 
 protocol NotificationPreferenceStoring: Sendable {
     func isEnabled() async -> Bool
     func setEnabled(_ enabled: Bool) async
+    func isThresholdEnabled(_ threshold: Int) async -> Bool
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async
 }
 
 protocol UserNotificationCenterServing: Sendable {
@@ -32,6 +43,7 @@ actor NotificationCoordinator: LimitNotifying {
 
         for limit in limits {
             for threshold in [20, 10] where limit.remainingPercent < Double(threshold) {
+                guard await sender.isThresholdEnabled(threshold) else { continue }
                 let receiptKey = [
                     limit.window.storageKey,
                     String(Int(limit.resetsAt.timeIntervalSince1970)),
@@ -79,6 +91,18 @@ final class UserNotificationSender: @unchecked Sendable, NotificationSending {
         await preferences.isEnabled()
     }
 
+    func setEnabled(_ enabled: Bool) async {
+        await preferences.setEnabled(enabled)
+    }
+
+    func isThresholdEnabled(_ threshold: Int) async -> Bool {
+        await preferences.isThresholdEnabled(threshold)
+    }
+
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async {
+        await preferences.setThresholdEnabled(enabled, threshold: threshold)
+    }
+
     func requestAuthorization() async throws -> Bool {
         let granted = try await center.requestAuthorization()
         await preferences.setEnabled(granted)
@@ -90,8 +114,10 @@ final class UserNotificationSender: @unchecked Sendable, NotificationSending {
     }
 }
 
-private actor UserDefaultsNotificationPreferences: NotificationPreferenceStoring {
+actor UserDefaultsNotificationPreferences: NotificationPreferenceStoring {
     private static let enabledKey = "notificationsEnabled"
+    private static let twentyPercentKey = "notificationsThreshold20Enabled"
+    private static let tenPercentKey = "notificationsThreshold10Enabled"
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -104,6 +130,25 @@ private actor UserDefaultsNotificationPreferences: NotificationPreferenceStoring
 
     func setEnabled(_ enabled: Bool) async {
         defaults.set(enabled, forKey: Self.enabledKey)
+    }
+
+    func isThresholdEnabled(_ threshold: Int) async -> Bool {
+        guard let key = Self.thresholdKey(threshold) else { return false }
+        guard defaults.object(forKey: key) != nil else { return true }
+        return defaults.bool(forKey: key)
+    }
+
+    func setThresholdEnabled(_ enabled: Bool, threshold: Int) async {
+        guard let key = Self.thresholdKey(threshold) else { return }
+        defaults.set(enabled, forKey: key)
+    }
+
+    private static func thresholdKey(_ threshold: Int) -> String? {
+        switch threshold {
+        case 20: twentyPercentKey
+        case 10: tenPercentKey
+        default: nil
+        }
     }
 }
 
