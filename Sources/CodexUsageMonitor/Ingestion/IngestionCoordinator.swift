@@ -302,8 +302,11 @@ actor IngestionCoordinator {
                 generation: generation,
                 allowsRebuild: false
             )
-        } catch is ScanInvalidated {
-            return nil
+        } catch {
+            guard generation == scanGeneration, !rebuilding else {
+                return nil
+            }
+            throw error
         }
     }
 

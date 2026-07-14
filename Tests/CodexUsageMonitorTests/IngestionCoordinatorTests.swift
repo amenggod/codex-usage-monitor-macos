@@ -340,6 +340,91 @@ struct IngestionCoordinatorTests {
     }
 
     @Test
+    func staleScanErrorAfterRebuildGenerationChangeIsDiscarded() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let root = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let logURL = root.appending(path: "stale-error.jsonl")
+        try writeSyntheticLog(at: logURL)
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let watcher = ControlledWatcher()
+        let scanController = SecondScanErrorController(suspendsBeforeError: true)
+        let coordinator = IngestionCoordinator(
+            roots: [root],
+            repository: repository,
+            scanner: scanner,
+            watcher: watcher,
+            debounceDelay: .milliseconds(10),
+            scanFileOperation: { url in
+                try await scanController.beforeScan()
+                return try await scanner.scan(url: url)
+            }
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+        await coordinator.start()
+        #expect(await recorder.waitForCount(1))
+
+        try appendSyntheticToken(to: logURL, second: 2, cumulativeTotal: 2)
+        watcher.emit()
+        await scanController.waitUntilSecondScanSuspended()
+
+        let rebuildTask = Task { try await coordinator.rebuildIndex() }
+        for _ in 0..<100 { await Task.yield() }
+        await scanController.resumeSecondScan()
+        try await rebuildTask.value
+
+        #expect(await recorder.waitForCount(2))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await recorder.count == 2)
+        #expect(await recorder.value(at: 0) == .completed)
+        #expect(await recorder.value(at: 1) == .completed)
+
+        await coordinator.stop()
+    }
+
+    @Test
+    func currentGenerationScanErrorStillPublishesFailed() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let root = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let logURL = root.appending(path: "current-error.jsonl")
+        try writeSyntheticLog(at: logURL)
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let watcher = ControlledWatcher()
+        let scanController = SecondScanErrorController(suspendsBeforeError: false)
+        let coordinator = IngestionCoordinator(
+            roots: [root],
+            repository: repository,
+            scanner: scanner,
+            watcher: watcher,
+            debounceDelay: .milliseconds(10),
+            scanFileOperation: { url in
+                try await scanController.beforeScan()
+                return try await scanner.scan(url: url)
+            }
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+        await coordinator.start()
+        #expect(await recorder.waitForCount(1))
+
+        try appendSyntheticToken(to: logURL, second: 2, cumulativeTotal: 2)
+        watcher.emit()
+
+        #expect(await recorder.waitForCount(2))
+        #expect(await recorder.value(at: 1) == .failed("synthetic scan failure"))
+
+        await coordinator.stop()
+    }
+
+    @Test
     func rebuildFailurePublishesFailedAndSchedulesRecovery() async throws {
         let directoryURL = try temporaryCoordinatorDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
@@ -506,6 +591,33 @@ private actor SequencedScanGate {
 
     func resume(call: Int) async {
         await gates[call]?.resume()
+    }
+}
+
+private actor SecondScanErrorController {
+    private let suspendsBeforeError: Bool
+    private let gate = SuspensionGate()
+    private var callCount = 0
+
+    init(suspendsBeforeError: Bool) {
+        self.suspendsBeforeError = suspendsBeforeError
+    }
+
+    func beforeScan() async throws {
+        callCount += 1
+        guard callCount == 2 else { return }
+        if suspendsBeforeError {
+            await gate.suspend()
+        }
+        throw SyntheticCoordinatorError(message: "synthetic scan failure")
+    }
+
+    func waitUntilSecondScanSuspended() async {
+        await gate.waitUntilSuspended()
+    }
+
+    func resumeSecondScan() async {
+        await gate.resume()
     }
 }
 
