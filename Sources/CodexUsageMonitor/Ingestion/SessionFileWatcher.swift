@@ -18,7 +18,13 @@ private let fseventsCallback: FSEventStreamCallback = { _, info, _, _, _, _ in
         .yield(())
 }
 
-final class SessionFileWatcher: @unchecked Sendable {
+protocol SessionFileWatching: AnyObject, Sendable {
+    var startupFailure: String? { get }
+    func events() -> AsyncStream<Void>
+    func stop()
+}
+
+final class SessionFileWatcher: SessionFileWatching, @unchecked Sendable {
     private let roots: [URL]
     private let queue = DispatchQueue(label: "CodexUsageMonitor.SessionFileWatcher")
     private let lock = NSLock()
@@ -27,6 +33,7 @@ final class SessionFileWatcher: @unchecked Sendable {
     private var continuation: AsyncStream<Void>.Continuation?
     private var eventStream: AsyncStream<Void>?
     private var stopped = false
+    private var failureMessage: String?
 
     init(roots: [URL]) {
         self.roots = roots
@@ -34,6 +41,10 @@ final class SessionFileWatcher: @unchecked Sendable {
 
     deinit {
         stop()
+    }
+
+    var startupFailure: String? {
+        lock.withLock { failureMessage }
     }
 
     func events() -> AsyncStream<Void> {
@@ -79,6 +90,7 @@ final class SessionFileWatcher: @unchecked Sendable {
             flags
         ) else {
             unmanagedContext.release()
+            failureMessage = "无法创建 Codex 会话文件监听器"
             stopped = true
             continuation.finish()
             return stream
@@ -89,6 +101,7 @@ final class SessionFileWatcher: @unchecked Sendable {
             FSEventStreamInvalidate(streamReference)
             FSEventStreamRelease(streamReference)
             unmanagedContext.release()
+            failureMessage = "无法启动 Codex 会话文件监听器"
             stopped = true
             continuation.finish()
             return stream

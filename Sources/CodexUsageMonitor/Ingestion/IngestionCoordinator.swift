@@ -5,6 +5,12 @@ enum IngestionUpdate: Equatable, Sendable {
     case failed(String)
 }
 
+private struct WatcherFailure: LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+
 actor IngestionCoordinator {
     private struct FileMetadata: Equatable, Sendable {
         let size: UInt64
@@ -19,7 +25,11 @@ actor IngestionCoordinator {
     private let roots: [URL]
     private let repository: UsageRepository
     private let scanner: SessionScanner
-    private let watcher: SessionFileWatcher
+    private var watcher: any SessionFileWatching
+    private let watcherFactory: @Sendable ([URL]) -> any SessionFileWatching
+    private let recoveryDelay: Duration
+    private let debounceDelay: Duration
+    private let resetIndexOperation: @Sendable () async throws -> Void
     private let updateStream: AsyncStream<IngestionUpdate>
     private let updateContinuation: AsyncStream<IngestionUpdate>.Continuation
     private var fileMetadata: [String: FileMetadata] = [:]
@@ -28,17 +38,31 @@ actor IngestionCoordinator {
     private var recoveryTask: Task<Void, Never>?
     private var started = false
     private var stopped = false
+    private var rebuilding = false
+    private var pendingRescanDuringRebuild = false
 
     init(
         roots: [URL],
         repository: UsageRepository,
         scanner: SessionScanner,
-        watcher: SessionFileWatcher
+        watcher: any SessionFileWatching,
+        watcherFactory: @escaping @Sendable ([URL]) -> any SessionFileWatching = {
+            SessionFileWatcher(roots: $0)
+        },
+        recoveryDelay: Duration = .seconds(30),
+        debounceDelay: Duration = .milliseconds(300),
+        resetIndexOperation: (@Sendable () async throws -> Void)? = nil
     ) {
         self.roots = roots
         self.repository = repository
         self.scanner = scanner
         self.watcher = watcher
+        self.watcherFactory = watcherFactory
+        self.recoveryDelay = recoveryDelay
+        self.debounceDelay = debounceDelay
+        self.resetIndexOperation = resetIndexOperation ?? {
+            try await repository.resetIndex()
+        }
         let pair = AsyncStream<IngestionUpdate>.makeStream(
             bufferingPolicy: .bufferingNewest(20)
         )
@@ -52,7 +76,20 @@ actor IngestionCoordinator {
 
         do {
             try await repository.migrate()
-            startWatching()
+        } catch {
+            updateContinuation.yield(.failed(error.localizedDescription))
+            return
+        }
+
+        do {
+            try startWatching()
+        } catch {
+            updateContinuation.yield(.failed(error.localizedDescription))
+            scheduleWatcherRecovery()
+            return
+        }
+
+        do {
             let missingRoot = try await scanChangedFiles(forceAll: true)
             scheduleRecoveryIfNeeded(missingRoot: missingRoot)
             updateContinuation.yield(.completed)
@@ -70,16 +107,32 @@ actor IngestionCoordinator {
     }
 
     func rebuildIndex() async throws {
+        guard !rebuilding else {
+            pendingRescanDuringRebuild = true
+            return
+        }
+        rebuilding = true
+        pendingRescanDuringRebuild = false
         debounceTask?.cancel()
         debounceTask = nil
+        recoveryTask?.cancel()
+        recoveryTask = nil
         do {
-            try await repository.resetIndex()
+            try await resetIndexOperation()
             try await repository.migrate()
             fileMetadata.removeAll()
-            let missingRoot = try await scanChangedFiles(forceAll: true)
+            var missingRoot = try await scanChangedFiles(forceAll: true)
+            if pendingRescanDuringRebuild {
+                pendingRescanDuringRebuild = false
+                missingRoot = try await scanChangedFiles(forceAll: false) || missingRoot
+            }
+            rebuilding = false
             scheduleRecoveryIfNeeded(missingRoot: missingRoot)
             updateContinuation.yield(.completed)
         } catch {
+            rebuilding = false
+            pendingRescanDuringRebuild = false
+            scheduleRebuildRecovery()
             updateContinuation.yield(.failed(error.localizedDescription))
             throw error
         }
@@ -98,21 +151,69 @@ actor IngestionCoordinator {
         updateContinuation.finish()
     }
 
-    private func startWatching() {
-        let events = watcher.events()
+    private func startWatching() throws {
+        let observedWatcher = watcher
+        let events = observedWatcher.events()
+        if let startupFailure = observedWatcher.startupFailure {
+            throw WatcherFailure(message: startupFailure)
+        }
         watcherTask = Task { [weak self] in
             for await _ in events {
                 guard !Task.isCancelled else { return }
                 await self?.scheduleDebouncedRescan()
             }
+            guard !Task.isCancelled else { return }
+            await self?.watcherDidEnd(observedWatcher)
+        }
+    }
+
+    private func watcherDidEnd(_ endedWatcher: any SessionFileWatching) {
+        guard !stopped, watcher === endedWatcher else { return }
+        let message = endedWatcher.startupFailure ?? "Codex 会话文件监听器意外停止"
+        updateContinuation.yield(.failed(message))
+        scheduleWatcherRecovery()
+    }
+
+    private func scheduleWatcherRecovery() {
+        recoveryTask?.cancel()
+        recoveryTask = Task { [weak self, recoveryDelay] in
+            do {
+                try await Task.sleep(for: recoveryDelay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await self?.recoverWatcher()
+        }
+    }
+
+    private func recoverWatcher() async {
+        guard !stopped else { return }
+        watcherTask?.cancel()
+        watcher.stop()
+        watcher = watcherFactory(roots)
+
+        do {
+            try startWatching()
+            let missingRoot = try await scanChangedFiles(forceAll: true)
+            scheduleRecoveryIfNeeded(missingRoot: missingRoot)
+            updateContinuation.yield(.completed)
+        } catch {
+            updateContinuation.yield(.failed(error.localizedDescription))
+            scheduleWatcherRecovery()
         }
     }
 
     private func scheduleDebouncedRescan() {
+        guard !rebuilding else {
+            pendingRescanDuringRebuild = true
+            return
+        }
         debounceTask?.cancel()
-        debounceTask = Task { [weak self] in
+        let delay = debounceDelay
+        debounceTask = Task { [weak self, delay] in
             do {
-                try await Task.sleep(for: .milliseconds(300))
+                try await Task.sleep(for: delay)
             } catch {
                 return
             }
@@ -122,6 +223,10 @@ actor IngestionCoordinator {
     }
 
     private func scanAndPublish(forceAll: Bool) async {
+        guard !rebuilding else {
+            pendingRescanDuringRebuild = true
+            return
+        }
         do {
             let missingRoot = try await scanChangedFiles(forceAll: forceAll)
             scheduleRecoveryIfNeeded(missingRoot: missingRoot)
@@ -193,9 +298,10 @@ actor IngestionCoordinator {
         recoveryTask = nil
         guard missingRoot, !stopped else { return }
 
-        recoveryTask = Task { [weak self] in
+        let delay = recoveryDelay
+        recoveryTask = Task { [weak self, delay] in
             do {
-                try await Task.sleep(for: .seconds(30))
+                try await Task.sleep(for: delay)
             } catch {
                 return
             }
@@ -203,4 +309,33 @@ actor IngestionCoordinator {
             await self?.scanAndPublish(forceAll: false)
         }
     }
+
+    private func scheduleRebuildRecovery() {
+        recoveryTask?.cancel()
+        let delay = recoveryDelay
+        recoveryTask = Task { [weak self, delay] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await self?.recoverFailedRebuild()
+        }
+    }
+
+    private func recoverFailedRebuild() async {
+        guard !stopped, !rebuilding else { return }
+        do {
+            try await repository.migrate()
+            fileMetadata.removeAll()
+            let missingRoot = try await scanChangedFiles(forceAll: true)
+            scheduleRecoveryIfNeeded(missingRoot: missingRoot)
+            updateContinuation.yield(.completed)
+        } catch {
+            updateContinuation.yield(.failed(error.localizedDescription))
+            scheduleRebuildRecovery()
+        }
+    }
+
 }

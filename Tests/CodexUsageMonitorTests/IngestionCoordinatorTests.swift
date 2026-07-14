@@ -5,6 +5,69 @@ import Testing
 @Suite(.serialized)
 struct IngestionCoordinatorTests {
     @Test
+    func watcherStartupFailurePublishesFailedThenRecovers() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let roots = [directoryURL.appending(path: "sessions", directoryHint: .isDirectory)]
+        try FileManager.default.createDirectory(at: roots[0], withIntermediateDirectories: true)
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let failedWatcher = ControlledWatcher(startupFailure: "synthetic watcher start failure")
+        let recoveredWatcher = ControlledWatcher()
+        let coordinator = IngestionCoordinator(
+            roots: roots,
+            repository: repository,
+            scanner: scanner,
+            watcher: failedWatcher,
+            watcherFactory: { _ in recoveredWatcher },
+            recoveryDelay: .milliseconds(10)
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+
+        await coordinator.start()
+
+        #expect(await recorder.waitForCount(1))
+        #expect(await recorder.value(at: 0) == .failed("synthetic watcher start failure"))
+        #expect(await recorder.waitForCount(2))
+        #expect(await recorder.value(at: 1) == .completed)
+        #expect(recoveredWatcher.eventsCallCount == 1)
+
+        await coordinator.stop()
+    }
+
+    @Test
+    func explicitStopDoesNotReportWatcherFailure() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let roots = [directoryURL.appending(path: "sessions", directoryHint: .isDirectory)]
+        try FileManager.default.createDirectory(at: roots[0], withIntermediateDirectories: true)
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let watcher = ControlledWatcher()
+        let coordinator = IngestionCoordinator(
+            roots: roots,
+            repository: repository,
+            scanner: scanner,
+            watcher: watcher,
+            watcherFactory: { _ in ControlledWatcher() },
+            recoveryDelay: .milliseconds(10)
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+        await coordinator.start()
+        #expect(await recorder.waitForCount(1))
+
+        await coordinator.stop()
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(await recorder.count == 1)
+        #expect(await recorder.value(at: 0) == .completed)
+    }
+
+    @Test
     func initialScanRecursesAcrossLiveAndArchivedRoots() async throws {
         let fixture = try CoordinatorFixture(createArchivedRoot: true)
         defer { fixture.remove() }
@@ -111,6 +174,95 @@ struct IngestionCoordinatorTests {
     }
 
     @Test
+    func rebuildDefersRecoveryAndWatcherEventsUntilOneFinalUpdate() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let sessionsRoot = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        let archivedRoot = directoryURL.appending(path: "archived", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sessionsRoot, withIntermediateDirectories: true)
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let watcher = ControlledWatcher()
+        let gate = SuspensionGate()
+        let coordinator = IngestionCoordinator(
+            roots: [sessionsRoot, archivedRoot],
+            repository: repository,
+            scanner: scanner,
+            watcher: watcher,
+            watcherFactory: { _ in ControlledWatcher() },
+            recoveryDelay: .milliseconds(200),
+            debounceDelay: .milliseconds(10),
+            resetIndexOperation: {
+                try await repository.resetIndex()
+                await gate.suspend()
+            }
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+        await coordinator.start()
+        #expect(await recorder.waitForCount(1))
+
+        let rebuildTask = Task {
+            try await coordinator.rebuildIndex()
+        }
+        await gate.waitUntilSuspended()
+        try FileManager.default.createDirectory(at: archivedRoot, withIntermediateDirectories: true)
+        watcher.emit()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(await recorder.count == 1)
+
+        await gate.resume()
+        try await rebuildTask.value
+        #expect(await recorder.waitForCount(2))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await recorder.count == 2)
+        #expect(await recorder.value(at: 1) == .completed)
+
+        await coordinator.stop()
+    }
+
+    @Test
+    func rebuildFailurePublishesFailedAndSchedulesRecovery() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let root = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let watcher = ControlledWatcher()
+        let coordinator = IngestionCoordinator(
+            roots: [root],
+            repository: repository,
+            scanner: scanner,
+            watcher: watcher,
+            watcherFactory: { _ in ControlledWatcher() },
+            recoveryDelay: .milliseconds(10),
+            resetIndexOperation: {
+                throw SyntheticCoordinatorError(message: "synthetic rebuild failure")
+            }
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+        await coordinator.start()
+        #expect(await recorder.waitForCount(1))
+
+        do {
+            try await coordinator.rebuildIndex()
+            Issue.record("expected rebuild failure")
+        } catch {}
+
+        #expect(await recorder.waitForCount(2))
+        #expect(await recorder.value(at: 1) == .failed("synthetic rebuild failure"))
+        #expect(await recorder.waitForCount(3, attempts: 20))
+        #expect(await recorder.value(at: 2) == .completed)
+
+        await coordinator.stop()
+    }
+
+    @Test
     func watcherStopIsIdempotentAndFinishesEvents() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "SessionFileWatcherTests-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -126,6 +278,83 @@ struct IngestionCoordinatorTests {
         let event: Void? = await iterator.next()
         #expect(event == nil)
     }
+}
+
+private func temporaryCoordinatorDirectory() throws -> URL {
+    let directoryURL = FileManager.default.temporaryDirectory
+        .appending(path: "InjectedCoordinatorTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+    return directoryURL
+}
+
+private final class ControlledWatcher: SessionFileWatching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let pair = AsyncStream<Void>.makeStream()
+    private let configuredStartupFailure: String?
+    private var eventCalls = 0
+
+    init(startupFailure: String? = nil) {
+        configuredStartupFailure = startupFailure
+    }
+
+    var startupFailure: String? {
+        configuredStartupFailure
+    }
+
+    var eventsCallCount: Int {
+        lock.withLock { eventCalls }
+    }
+
+    func events() -> AsyncStream<Void> {
+        lock.withLock { eventCalls += 1 }
+        if configuredStartupFailure != nil {
+            pair.continuation.finish()
+        }
+        return pair.stream
+    }
+
+    func stop() {
+        pair.continuation.finish()
+    }
+
+    func emit() {
+        pair.continuation.yield(())
+    }
+}
+
+private actor SuspensionGate {
+    private var suspended = false
+    private var suspensionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var resumeContinuation: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        suspended = true
+        let waiters = suspensionWaiters
+        suspensionWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            resumeContinuation = continuation
+        }
+    }
+
+    func waitUntilSuspended() async {
+        guard !suspended else { return }
+        await withCheckedContinuation { continuation in
+            suspensionWaiters.append(continuation)
+        }
+    }
+
+    func resume() {
+        resumeContinuation?.resume()
+        resumeContinuation = nil
+    }
+}
+
+private struct SyntheticCoordinatorError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }
 
 private actor UpdateRecorder {
