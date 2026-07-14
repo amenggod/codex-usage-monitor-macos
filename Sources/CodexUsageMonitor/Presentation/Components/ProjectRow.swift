@@ -1,5 +1,11 @@
 import SwiftUI
 
+enum ProjectRowAccessibilityFormatter {
+    static func label(for project: ProjectUsage) -> String {
+        "\(project.displayName)，\(project.usage.total) Token"
+    }
+}
+
 struct ProjectRow: View {
     let project: ProjectUsage
 
@@ -14,7 +20,6 @@ struct ProjectRow: View {
         }
         .help(project.fullPath ?? project.displayName)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(project.displayName)，\(project.usage.total) Token")
-        .accessibilityHint(project.fullPath ?? "")
+        .accessibilityLabel(ProjectRowAccessibilityFormatter.label(for: project))
     }
 }

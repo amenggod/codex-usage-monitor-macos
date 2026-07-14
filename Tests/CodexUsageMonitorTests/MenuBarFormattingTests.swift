@@ -19,4 +19,19 @@ struct MenuBarFormattingTests {
             LimitStatus(window: .fiveHours, usedPercent: 28, resetsAt: .distantFuture),
         ]) == "Codex --")
     }
+
+    @Test func projectAccessibilityTextNeverContainsFullPath() {
+        let project = ProjectUsage(
+            id: "secret-project",
+            displayName: "project",
+            fullPath: "/Users/alice/ClientSecret/project",
+            usage: TokenUsage(input: 42, cachedInput: 0, output: 0, reasoningOutput: 0, total: 42)
+        )
+
+        let label = ProjectRowAccessibilityFormatter.label(for: project)
+
+        #expect(label == "project，42 Token")
+        #expect(!label.contains("/Users/alice"))
+        #expect(!label.contains("ClientSecret"))
+    }
 }

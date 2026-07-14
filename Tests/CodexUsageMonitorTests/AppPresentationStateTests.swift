@@ -5,6 +5,17 @@ import Testing
 @Suite("AppPresentationStateTests")
 struct AppPresentationStateTests {
     @MainActor
+    @Test func appRuntimeLaunchStartsMonitoringOnceWithoutPopover() async {
+        let starter = RuntimeStarterSpy()
+        let runtime = AppRuntime(starter: starter)
+
+        await runtime.launch()
+        await runtime.launch()
+
+        #expect(await starter.startCount == 1)
+    }
+
+    @MainActor
     @Test func launchAtLoginFailureRollsBackAndSurfacesError() {
         let service = LaunchAtLoginServiceSpy(enabled: false, enableFailure: "无法启用")
         let state = SettingsViewState(launchAtLogin: service)
@@ -76,6 +87,14 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
 private struct PresentationTestFailure: LocalizedError, Sendable {
     let message: String
     var errorDescription: String? { message }
+}
+
+private actor RuntimeStarterSpy: AppRuntimeStarting {
+    private(set) var startCount = 0
+
+    func start() async {
+        startCount += 1
+    }
 }
 
 @MainActor
