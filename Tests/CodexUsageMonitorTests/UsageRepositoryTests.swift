@@ -211,6 +211,102 @@ struct UsageRepositoryTests {
     }
 
     @Test
+    func pageLevelCorruptionIsDetectedBeforeRepositoryIsReturned() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        let corruptCopyURL = URL(fileURLWithPath: databaseURL.path + ".corrupt-10")
+        defer {
+            removeDatabase(at: databaseURL)
+            removeDatabase(at: corruptCopyURL)
+        }
+        try createDatabaseWithCorruptTableRootPage(at: databaseURL)
+
+        do {
+            let probe = try SQLiteDatabase(url: databaseURL)
+            var version: Int64 = 0
+            try probe.query("PRAGMA user_version") { statement in
+                version = sqlite3_column_int64(statement, 0)
+            }
+            #expect(version == 1)
+        }
+
+        let repository = try UsageRepository.openRecovering(
+            url: databaseURL,
+            now: Date(timeIntervalSince1970: 10)
+        )
+        try await repository.migrate()
+
+        #expect(FileManager.default.fileExists(atPath: corruptCopyURL.path))
+        #expect(try await !repository.notificationWasSent("fresh-index"))
+    }
+
+    @Test
+    func corruptSidecarsArePreservedBesideBackupDatabase() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        let backupURL = URL(fileURLWithPath: databaseURL.path + ".corrupt-20")
+        let sourceWAL = URL(fileURLWithPath: databaseURL.path + "-wal")
+        let sourceSHM = URL(fileURLWithPath: databaseURL.path + "-shm")
+        let backupWAL = URL(fileURLWithPath: backupURL.path + "-wal")
+        let backupSHM = URL(fileURLWithPath: backupURL.path + "-shm")
+        defer {
+            removeDatabase(at: databaseURL)
+            removeDatabase(at: backupURL)
+            try? FileManager.default.removeItem(atPath: sourceWAL.path + ".corrupt-20")
+            try? FileManager.default.removeItem(atPath: sourceSHM.path + ".corrupt-20")
+        }
+        let walBytes = Data("synthetic-wal-sidecar".utf8)
+        let shmBytes = Data("synthetic-shm-sidecar".utf8)
+        try Data("not a sqlite database".utf8).write(to: databaseURL)
+        try walBytes.write(to: sourceWAL)
+        try shmBytes.write(to: sourceSHM)
+
+        do {
+            let repository = try UsageRepository.openRecovering(
+                url: databaseURL,
+                now: Date(timeIntervalSince1970: 20)
+            )
+            try await repository.migrate()
+        }
+
+        #expect(try Data(contentsOf: backupWAL) == walBytes)
+        #expect(try Data(contentsOf: backupSHM) == shmBytes)
+        #expect((try? Data(contentsOf: sourceWAL)) != walBytes)
+        #expect((try? Data(contentsOf: sourceSHM)) != shmBytes)
+    }
+
+    @Test
+    func sameSecondBackupCollisionUsesNextCompleteFileSet() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        let existingBackupURL = URL(fileURLWithPath: databaseURL.path + ".corrupt-30")
+        let nextBackupURL = URL(fileURLWithPath: databaseURL.path + ".corrupt-30-1")
+        let existingBytes = Data("existing-backup".utf8)
+        let corruptBytes = Data("new-corrupt-database".utf8)
+        let walBytes = Data("new-corrupt-wal".utf8)
+        let shmBytes = Data("new-corrupt-shm".utf8)
+        defer {
+            removeDatabase(at: databaseURL)
+            removeDatabase(at: existingBackupURL)
+            removeDatabase(at: nextBackupURL)
+        }
+        try existingBytes.write(to: existingBackupURL)
+        try corruptBytes.write(to: databaseURL)
+        try walBytes.write(to: URL(fileURLWithPath: databaseURL.path + "-wal"))
+        try shmBytes.write(to: URL(fileURLWithPath: databaseURL.path + "-shm"))
+
+        do {
+            let repository = try UsageRepository.openRecovering(
+                url: databaseURL,
+                now: Date(timeIntervalSince1970: 30)
+            )
+            try await repository.migrate()
+        }
+
+        #expect(try Data(contentsOf: existingBackupURL) == existingBytes)
+        #expect(try Data(contentsOf: nextBackupURL) == corruptBytes)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: nextBackupURL.path + "-wal")) == walBytes)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: nextBackupURL.path + "-shm")) == shmBytes)
+    }
+
+    @Test
     func nonCorruptionOpenErrorsPropagateWithoutBackup() throws {
         let directoryURL = FileManager.default.temporaryDirectory
             .appending(path: "UsageRepositoryTests-directory-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -241,5 +337,74 @@ struct UsageRepositoryTests {
         for suffix in ["", "-wal", "-shm"] {
             try? FileManager.default.removeItem(atPath: url.path + suffix)
         }
+    }
+
+    private func createDatabaseWithCorruptTableRootPage(at url: URL) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create corruption fixture")
+        }
+
+        let pageSize: Int
+        let rootPage: Int
+        do {
+            try executeRawSQL(
+                "CREATE TABLE damaged_payload (id INTEGER PRIMARY KEY, value TEXT); " +
+                "INSERT INTO damaged_payload (value) VALUES ('synthetic'); " +
+                "PRAGMA user_version = 1;",
+                handle: handle
+            )
+            pageSize = try queryRawInteger("PRAGMA page_size", handle: handle)
+            rootPage = try queryRawInteger(
+                "SELECT rootpage FROM sqlite_schema WHERE name = 'damaged_payload'",
+                handle: handle
+            )
+        } catch {
+            sqlite3_close(handle)
+            throw error
+        }
+        guard sqlite3_close(handle) == SQLITE_OK else {
+            throw SQLiteError(code: SQLITE_BUSY, message: "could not close corruption fixture")
+        }
+
+        var bytes = try Data(contentsOf: url)
+        let pageStart = (rootPage - 1) * pageSize
+        let pageEnd = pageStart + pageSize
+        guard pageStart >= 100, pageEnd <= bytes.count else {
+            throw SQLiteError(code: SQLITE_CORRUPT, message: "invalid synthetic root page range")
+        }
+        bytes.replaceSubrange(pageStart..<pageEnd, with: repeatElement(UInt8(0), count: pageSize))
+        try bytes.write(to: url, options: .atomic)
+    }
+
+    private func executeRawSQL(_ sql: String, handle: OpaquePointer) throws {
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        let result = sqlite3_exec(handle, sql, nil, nil, &errorMessage)
+        defer { sqlite3_free(errorMessage) }
+        guard result == SQLITE_OK else {
+            throw SQLiteError(
+                code: result,
+                message: errorMessage.map { String(cString: $0) } ?? "raw SQL failed"
+            )
+        }
+    }
+
+    private func queryRawInteger(_ sql: String, handle: OpaquePointer) throws -> Int {
+        var statement: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
+        guard prepareResult == SQLITE_OK, let statement else {
+            throw SQLiteError(code: prepareResult, message: "raw query prepare failed")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw SQLiteError(code: sqlite3_errcode(handle), message: "raw query returned no row")
+        }
+        return Int(sqlite3_column_int64(statement, 0))
     }
 }

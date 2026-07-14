@@ -16,19 +16,39 @@ struct FileCursor: Equatable, Sendable {
 }
 
 actor UsageRepository {
+    private struct SidecarSnapshot {
+        let suffix: String
+        let url: URL
+    }
+
     private let database: SQLiteDatabase
 
     init(url: URL) throws {
         database = try SQLiteDatabase(url: url)
     }
 
+    private init(database: SQLiteDatabase) {
+        self.database = database
+    }
+
     static func openRecovering(url: URL, now: Date = .now) throws -> UsageRepository {
+        let sidecarSnapshots = try snapshotSidecars(at: url)
+        defer {
+            for snapshot in sidecarSnapshots {
+                try? FileManager.default.removeItem(at: snapshot.url)
+            }
+        }
+
         do {
-            return try UsageRepository(url: url)
+            return try openValidated(url: url)
         } catch let error as SQLiteError
             where error.code == SQLITE_CORRUPT || error.code == SQLITE_NOTADB {
-            try preserveCorruptDatabase(at: url, now: now)
-            return try UsageRepository(url: url)
+            try preserveCorruptDatabase(
+                at: url,
+                now: now,
+                sidecarSnapshots: sidecarSnapshots
+            )
+            return try openValidated(url: url)
         }
     }
 
@@ -464,16 +484,106 @@ actor UsageRepository {
         return text(from: statement, column: column)
     }
 
-    private static func preserveCorruptDatabase(at url: URL, now: Date) throws {
+    private static func preserveCorruptDatabase(
+        at url: URL,
+        now: Date,
+        sidecarSnapshots: [SidecarSnapshot]
+    ) throws {
         let marker = ".corrupt-\(Int64(now.timeIntervalSince1970))"
         let fileManager = FileManager.default
+        let backupBase = availableBackupBase(
+            for: url,
+            marker: marker,
+            fileManager: fileManager
+        )
+        let quarantineMarker = ".recovery-discard-\(UUID().uuidString)"
+        var moves: [(source: URL, destination: URL)] = []
 
-        for suffix in ["", "-wal", "-shm"] {
-            let source = URL(fileURLWithPath: url.path + suffix)
-            guard fileManager.fileExists(atPath: source.path) else { continue }
+        do {
+            let sourceDatabase = url
+            if fileManager.fileExists(atPath: sourceDatabase.path) {
+                try fileManager.moveItem(at: sourceDatabase, to: backupBase)
+                moves.append((sourceDatabase, backupBase))
+            }
 
-            let destination = URL(fileURLWithPath: source.path + marker)
-            try fileManager.moveItem(at: source, to: destination)
+            for suffix in ["-wal", "-shm"] {
+                let source = URL(fileURLWithPath: url.path + suffix)
+                guard fileManager.fileExists(atPath: source.path) else { continue }
+                let quarantine = URL(fileURLWithPath: source.path + quarantineMarker)
+                try fileManager.moveItem(at: source, to: quarantine)
+                moves.append((source, quarantine))
+            }
+
+            for snapshot in sidecarSnapshots {
+                let destination = URL(fileURLWithPath: backupBase.path + snapshot.suffix)
+                try fileManager.moveItem(at: snapshot.url, to: destination)
+                moves.append((snapshot.url, destination))
+            }
+
+            for move in moves where move.destination.path.contains(quarantineMarker) {
+                try? fileManager.removeItem(at: move.destination)
+            }
+        } catch {
+            for move in moves.reversed()
+                where fileManager.fileExists(atPath: move.destination.path)
+                    && !fileManager.fileExists(atPath: move.source.path) {
+                try? fileManager.moveItem(at: move.destination, to: move.source)
+            }
+            throw error
         }
+    }
+
+    private static func availableBackupBase(
+        for url: URL,
+        marker: String,
+        fileManager: FileManager
+    ) -> URL {
+        var attempt = 0
+        while true {
+            let suffix = attempt == 0 ? "" : "-\(attempt)"
+            let candidate = URL(fileURLWithPath: url.path + marker + suffix)
+            let candidatePaths = [candidate.path, candidate.path + "-wal", candidate.path + "-shm"]
+            if candidatePaths.allSatisfy({ !pathExists($0, fileManager: fileManager) }) {
+                return candidate
+            }
+            attempt += 1
+        }
+    }
+
+    private static func pathExists(_ path: String, fileManager: FileManager) -> Bool {
+        if fileManager.fileExists(atPath: path) {
+            return true
+        }
+        return (try? fileManager.destinationOfSymbolicLink(atPath: path)) != nil
+    }
+
+    private static func snapshotSidecars(at url: URL) throws -> [SidecarSnapshot] {
+        let fileManager = FileManager.default
+        var snapshots: [SidecarSnapshot] = []
+
+        do {
+            for suffix in ["-wal", "-shm"] {
+                let source = URL(fileURLWithPath: url.path + suffix)
+                guard fileManager.fileExists(atPath: source.path) else { continue }
+                let snapshotURL = URL(
+                    fileURLWithPath: source.path + ".recovery-snapshot-\(UUID().uuidString)"
+                )
+                try fileManager.copyItem(at: source, to: snapshotURL)
+                snapshots.append(SidecarSnapshot(suffix: suffix, url: snapshotURL))
+            }
+            return snapshots
+        } catch {
+            for snapshot in snapshots {
+                try? fileManager.removeItem(at: snapshot.url)
+            }
+            throw error
+        }
+    }
+
+    private static func openValidated(url: URL) throws -> UsageRepository {
+        let database = try SQLiteDatabase(url: url, configure: false)
+        try database.quickCheck()
+        try database.configureForRepository()
+        return UsageRepository(database: database)
     }
 }

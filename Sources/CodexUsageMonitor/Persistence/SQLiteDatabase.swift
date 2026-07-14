@@ -21,7 +21,7 @@ final class SQLiteDatabase: @unchecked Sendable {
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    init(url: URL) throws {
+    init(url: URL, configure: Bool = true) throws {
         let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         let result = sqlite3_open_v2(url.path, &handle, flags, nil)
         guard result == SQLITE_OK else {
@@ -31,13 +31,14 @@ final class SQLiteDatabase: @unchecked Sendable {
             throw error
         }
 
-        do {
-            try execute("PRAGMA foreign_keys = ON")
-            try execute("PRAGMA journal_mode = WAL")
-        } catch {
-            sqlite3_close(handle)
-            handle = nil
-            throw error
+        if configure {
+            do {
+                try configureForRepository()
+            } catch {
+                sqlite3_close(handle)
+                handle = nil
+                throw error
+            }
         }
     }
 
@@ -81,6 +82,31 @@ final class SQLiteDatabase: @unchecked Sendable {
                 throw currentError()
             }
         }
+    }
+
+    func quickCheck() throws {
+        var messages: [String] = []
+        try query("PRAGMA quick_check") { statement in
+            guard let value = sqlite3_column_text(statement, 0) else {
+                messages.append("quick_check returned a null result")
+                return
+            }
+            messages.append(String(cString: value))
+        }
+
+        guard messages == ["ok"] else {
+            throw SQLiteError(
+                code: SQLITE_CORRUPT,
+                message: messages.isEmpty
+                    ? "quick_check returned no result"
+                    : messages.joined(separator: "; ")
+            )
+        }
+    }
+
+    func configureForRepository() throws {
+        try execute("PRAGMA foreign_keys = ON")
+        try execute("PRAGMA journal_mode = WAL")
     }
 
     private func prepare(_ sql: String) throws -> OpaquePointer {
