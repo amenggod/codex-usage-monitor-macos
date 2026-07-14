@@ -15,6 +15,7 @@ private struct ScanInvalidated: Error {}
 
 actor IngestionCoordinator {
     private struct FileMetadata: Equatable, Sendable {
+        let fileKey: String
         let size: UInt64
         let modifiedAt: Date
     }
@@ -360,6 +361,7 @@ actor IngestionCoordinator {
     private func discoverJSONLFiles() throws -> DiscoveredFiles {
         let fileManager = FileManager.default
         let keys: Set<URLResourceKey> = [
+            .fileResourceIdentifierKey,
             .isRegularFileKey,
             .fileSizeKey,
             .contentModificationDateKey
@@ -389,6 +391,9 @@ actor IngestionCoordinator {
                 let values = try fileURL.resourceValues(forKeys: keys)
                 guard values.isRegularFile == true else { continue }
                 let metadata = FileMetadata(
+                    fileKey: values.fileResourceIdentifier
+                        .map { String(describing: $0) }
+                        ?? fileURL.standardizedFileURL.path,
                     size: UInt64(values.fileSize ?? 0),
                     modifiedAt: values.contentModificationDate ?? .distantPast
                 )

@@ -1,0 +1,5 @@
+{"timestamp":"2026-07-15T03:00:00Z","type":"session_meta","payload":{"id":"fixture-truncated","cwd":"/synthetic/projects/gamma"}}
+{"timestamp":"2026-07-15T03:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":70,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":70},"total_token_usage":{"input_tokens":70,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":70}}}}
+{malformed-middle
+{"timestamp":"2026-07-15T03:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":20},"total_token_usage":{"input_tokens":90,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":90}}}}
+{"timestamp":"2026-07-15T03:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":15,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":15},"total_token_usage":{"input_tokens":105,"cached_input_tokens":0
