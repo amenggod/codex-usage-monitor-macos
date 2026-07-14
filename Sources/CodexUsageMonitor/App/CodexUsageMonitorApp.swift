@@ -1,12 +1,24 @@
 import SwiftUI
 
 @main
+@MainActor
 struct CodexUsageMonitorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @State private var model = LiveDependencies.makeViewModel()
 
     var body: some Scene {
-        MenuBarExtra("Codex Usage Monitor", systemImage: "gauge.with.dots.needle.33percent") {
-            Text("Codex Usage Monitor")
+        MenuBarExtra {
+            UsagePopoverView(model: model)
+                .frame(width: 520, height: 480)
+                .task { await model.start() }
+        } label: {
+            MenuBarLabel(snapshot: model.snapshot)
+        }
+        .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(model: model)
+                .frame(width: 460, height: 360)
         }
     }
 }
