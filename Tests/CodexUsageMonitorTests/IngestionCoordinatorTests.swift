@@ -88,6 +88,7 @@ struct IngestionCoordinatorTests {
         await fixture.coordinator.stop()
     }
 
+    @Test
     func rebuildClearsTheIndexBeforeFullRescan() async throws {
         let fixture = try CoordinatorFixture(createArchivedRoot: true)
         defer { fixture.remove() }
