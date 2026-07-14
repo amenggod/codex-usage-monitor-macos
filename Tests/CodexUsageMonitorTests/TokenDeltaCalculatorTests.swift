@@ -58,6 +58,52 @@ struct TokenDeltaCalculatorTests {
     }
 
     @Test
+    func returnsZeroWhenAuthoritativeCumulativeTotalMovesBackward() {
+        let delta = TokenDeltaCalculator.delta(
+            lastUsage: nil,
+            cumulativeUsage: TokenUsage(
+                input: 70,
+                cachedInput: 5,
+                output: 10,
+                reasoningOutput: 2,
+                total: 20
+            ),
+            previousCumulative: TokenUsage(
+                input: 60,
+                cachedInput: 8,
+                output: 20,
+                reasoningOutput: 4,
+                total: 100
+            )
+        )
+
+        #expect(delta == .zero)
+    }
+
+    @Test
+    func returnsZeroWhenAuthoritativeCumulativeTotalDoesNotAdvance() {
+        let delta = TokenDeltaCalculator.delta(
+            lastUsage: nil,
+            cumulativeUsage: TokenUsage(
+                input: 70,
+                cachedInput: 5,
+                output: 10,
+                reasoningOutput: 2,
+                total: 100
+            ),
+            previousCumulative: TokenUsage(
+                input: 60,
+                cachedInput: 8,
+                output: 20,
+                reasoningOutput: 4,
+                total: 100
+            )
+        )
+
+        #expect(delta == .zero)
+    }
+
+    @Test
     func usesCumulativeUsageWhenThereIsNoPreviousSnapshot() {
         let cumulative = TokenUsage(
             input: 40,

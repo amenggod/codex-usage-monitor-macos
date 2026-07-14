@@ -18,6 +18,16 @@ struct ProjectPathNormalizerTests {
     }
 
     @Test
+    func fullPathKeyDistinguishesProjectsWithTheSameDisplayName() {
+        let first = normalizer.identity(for: "/synthetic/first/shared-name")
+        let second = normalizer.identity(for: "/synthetic/second/shared-name")
+
+        #expect(first.displayName == second.displayName)
+        #expect(first.key != second.key)
+        #expect(first.fullPath != second.fullPath)
+    }
+
+    @Test
     func expandsTildeInSyntheticPath() {
         let identity = normalizer.identity(for: "~/synthetic-work/alpha")
         let expectedPath = FileManager.default.homeDirectoryForCurrentUser

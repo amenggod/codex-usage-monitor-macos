@@ -16,6 +16,10 @@ enum TokenDeltaCalculator {
             return cumulativeUsage
         }
 
+        guard cumulativeUsage.total > previousCumulative.total else {
+            return .zero
+        }
+
         return cumulativeUsage - previousCumulative
     }
 }
