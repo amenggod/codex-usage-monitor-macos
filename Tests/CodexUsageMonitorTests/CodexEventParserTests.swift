@@ -37,6 +37,35 @@ struct CodexEventParserTests {
     }
 
     @Test
+    func fallsBackToPayloadWhenTopLevelTimestampIsInvalid() throws {
+        let line = Data(#"{"timestamp":"not-a-date","type":"session_meta","payload":{"id":"fallback","timestamp":"2026-07-14T01:00:00Z"}}"#.utf8)
+        let event = try #require(parser.parse(line: line))
+        guard case let .session(metadata) = event else {
+            Issue.record("expected session")
+            return
+        }
+
+        #expect(metadata.sessionID == "fallback")
+    }
+
+    @Test
+    func fallsBackAcrossWrongTimestampTypes() throws {
+        let wrongTopLevel = Data(#"{"timestamp":42,"type":"session_meta","payload":{"id":"payload-fallback","timestamp":"2026-07-14T01:00:00Z"}}"#.utf8)
+        let wrongPayload = Data(#"{"timestamp":"2026-07-14T01:00:00Z","type":"session_meta","payload":{"id":"top-level-fallback","timestamp":{"invalid":true}}}"#.utf8)
+
+        let payloadFallback = try #require(parser.parse(line: wrongTopLevel))
+        let topLevelFallback = try #require(parser.parse(line: wrongPayload))
+        guard case let .session(payloadMetadata) = payloadFallback,
+              case let .session(topLevelMetadata) = topLevelFallback else {
+            Issue.record("expected sessions")
+            return
+        }
+
+        #expect(payloadMetadata.sessionID == "payload-fallback")
+        #expect(topLevelMetadata.sessionID == "top-level-fallback")
+    }
+
+    @Test
     func ignoresMissingAndInvalidTimestamps() {
         #expect(parser.parse(line: Data(#"{"type":"session_meta","payload":{"id":"missing"}}"#.utf8)) == nil)
         #expect(parser.parse(line: Data(#"{"timestamp":"not-a-date","type":"session_meta","payload":{"id":"invalid"}}"#.utf8)) == nil)
@@ -65,6 +94,46 @@ struct CodexEventParserTests {
         ))
         #expect(token.cumulativeUsage?.total == 777)
         #expect(token.limits.map(\.window) == [.fiveHours, .week])
+    }
+
+    @Test
+    func ignoresWrongWorkingDirectoryType() throws {
+        let line = Data(#"{"timestamp":"2026-07-14T01:00:00Z","type":"session_meta","payload":{"id":"wrong-cwd","cwd":{"unexpected":true}}}"#.utf8)
+        let event = try #require(parser.parse(line: line))
+        guard case let .session(metadata) = event else {
+            Issue.record("expected session")
+            return
+        }
+
+        #expect(metadata.sessionID == "wrong-cwd")
+        #expect(metadata.workingDirectory == nil)
+    }
+
+    @Test
+    func preservesTokenLimitsWhenInfoHasWrongType() throws {
+        let line = Data(#"{"timestamp":"2026-07-14T01:05:00Z","type":"event_msg","payload":{"type":"token_count","info":"unexpected","rate_limits":{"limit_id":"codex","primary":{"used_percent":28,"window_minutes":300,"resets_at":1784000000}}}}"#.utf8)
+        let event = try #require(parser.parse(line: line))
+        guard case let .token(token) = event else {
+            Issue.record("expected token")
+            return
+        }
+
+        #expect(token.lastUsage == nil)
+        #expect(token.cumulativeUsage == nil)
+        #expect(token.limits.map(\.window) == [.fiveHours])
+    }
+
+    @Test
+    func preservesTokenUsageWhenRateLimitsHaveWrongType() throws {
+        let line = Data(#"{"timestamp":"2026-07-14T01:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":777}},"rate_limits":"unexpected"}}"#.utf8)
+        let event = try #require(parser.parse(line: line))
+        guard case let .token(token) = event else {
+            Issue.record("expected token")
+            return
+        }
+
+        #expect(token.lastUsage?.total == 777)
+        #expect(token.limits == [])
     }
 
     @Test
