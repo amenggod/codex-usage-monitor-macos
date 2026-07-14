@@ -20,6 +20,7 @@ protocol UserNotificationCenterServing: Sendable {
 actor NotificationCoordinator: LimitNotifying {
     private let repository: UsageRepository
     private let sender: any NotificationSending
+    private var inFlightReceiptKeys: Set<String> = []
 
     init(repository: UsageRepository, sender: any NotificationSending) {
         self.repository = repository
@@ -36,6 +37,8 @@ actor NotificationCoordinator: LimitNotifying {
                     String(Int(limit.resetsAt.timeIntervalSince1970)),
                     String(threshold),
                 ].joined(separator: "|")
+                guard inFlightReceiptKeys.insert(receiptKey).inserted else { continue }
+                defer { inFlightReceiptKeys.remove(receiptKey) }
 
                 let wasSent: Bool
                 do {

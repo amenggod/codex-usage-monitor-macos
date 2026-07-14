@@ -128,6 +128,86 @@ struct NotificationCoordinatorTests {
         #expect(await sender.sentThresholds == [20, 20])
     }
 
+    @Test func concurrentEvaluationsForTheSameReceiptSendOnlyOnce() async throws {
+        let database = try TemporaryNotificationDatabase()
+        try await database.repository.migrate()
+        let sender = GatedNotificationSender()
+        let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+        let reset = Date(timeIntervalSince1970: 9_000)
+        let limit = LimitStatus(window: .fiveHours, usedPercent: 81, resetsAt: reset)
+
+        let firstEvaluation = Task {
+            await coordinator.evaluate([limit])
+        }
+        #expect(await eventually { await sender.isWaitingToSend })
+        let secondEvaluation = Task {
+            await coordinator.evaluate([limit])
+        }
+        await secondEvaluation.value
+
+        await sender.resumeSend()
+        await firstEvaluation.value
+
+        #expect(await sender.attemptedThresholds == [20])
+        #expect(await sender.sentThresholds == [20])
+        #expect(try await database.repository.notificationWasSent("five-hours|9000|20"))
+    }
+
+    @Test func failedInFlightSendReleasesReceiptForLaterRetry() async throws {
+        let database = try TemporaryNotificationDatabase()
+        try await database.repository.migrate()
+        let sender = GatedNotificationSender(firstSendFails: true)
+        let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+        let reset = Date(timeIntervalSince1970: 10_000)
+        let limit = LimitStatus(window: .fiveHours, usedPercent: 81, resetsAt: reset)
+
+        let firstEvaluation = Task {
+            await coordinator.evaluate([limit])
+        }
+        #expect(await eventually { await sender.isWaitingToSend })
+        let concurrentEvaluation = Task {
+            await coordinator.evaluate([limit])
+        }
+        await concurrentEvaluation.value
+
+        await sender.resumeSend()
+        await firstEvaluation.value
+        #expect(try await !database.repository.notificationWasSent("five-hours|10000|20"))
+
+        await coordinator.evaluate([limit])
+
+        #expect(await sender.attemptedThresholds == [20, 20])
+        #expect(await sender.sentThresholds == [20])
+        #expect(try await database.repository.notificationWasSent("five-hours|10000|20"))
+    }
+
+    @Test func concurrentDifferentWindowKeysBothSend() async throws {
+        let database = try TemporaryNotificationDatabase()
+        try await database.repository.migrate()
+        let sender = GatedNotificationSender()
+        let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+        let reset = Date(timeIntervalSince1970: 11_000)
+        let fiveHourLimit = LimitStatus(window: .fiveHours, usedPercent: 81, resetsAt: reset)
+        let weekLimit = LimitStatus(window: .week, usedPercent: 81, resetsAt: reset)
+
+        let firstEvaluation = Task {
+            await coordinator.evaluate([fiveHourLimit])
+        }
+        #expect(await eventually { await sender.isWaitingToSend })
+        let secondEvaluation = Task {
+            await coordinator.evaluate([weekLimit])
+        }
+        await secondEvaluation.value
+
+        await sender.resumeSend()
+        await firstEvaluation.value
+
+        #expect(await sender.attemptedThresholds == [20, 20])
+        #expect(await sender.sentThresholds == [20, 20])
+        #expect(try await database.repository.notificationWasSent("five-hours|11000|20"))
+        #expect(try await database.repository.notificationWasSent("week|11000|20"))
+    }
+
     @Test func explicitDeniedAuthorizationKeepsSettingFalseWithoutAutomaticReprompt() async throws {
         let preferences = NotificationPreferencesSpy(enabled: false)
         let center = UserNotificationCenterSpy(authorizationResults: [false])
@@ -184,20 +264,31 @@ private actor NotificationSenderSpy: NotificationSending {
 private actor GatedNotificationSender: NotificationSending {
     private var sendContinuation: CheckedContinuation<Void, Never>?
     private var hasGatedSend = false
+    private let firstSendFails: Bool
+    private(set) var attemptedThresholds: [Int] = []
     private(set) var sentThresholds: [Int] = []
 
     var isWaitingToSend: Bool { sendContinuation != nil }
+
+    init(firstSendFails: Bool = false) {
+        self.firstSendFails = firstSendFails
+    }
 
     func isEnabled() async -> Bool { true }
 
     func requestAuthorization() async throws -> Bool { true }
 
     func send(title: String, body: String, threshold: Int) async throws {
+        attemptedThresholds.append(threshold)
+        let isFirstSend = !hasGatedSend
         if !hasGatedSend {
             hasGatedSend = true
             await withCheckedContinuation { continuation in
                 sendContinuation = continuation
             }
+        }
+        if isFirstSend, firstSendFails {
+            throw NotificationTestFailure()
         }
         sentThresholds.append(threshold)
     }
