@@ -18,6 +18,7 @@ struct UsageViewModelTests {
 
         await viewModel.start()
         await viewModel.start()
+        await settleAsyncWork()
 
         #expect(await coordinator.startCount == 1)
         #expect(await aggregator.requestedRanges == [.today])
@@ -33,6 +34,9 @@ struct UsageViewModelTests {
         let coordinator = CoordinatorSpy()
         let viewModel = UsageViewModel(aggregator: aggregator, coordinator: coordinator)
         await viewModel.start()
+        await settleAsyncWork()
+
+        #expect(await aggregator.requestedRanges == [.today])
 
         await coordinator.send(.completed)
 
@@ -66,6 +70,9 @@ struct UsageViewModelTests {
         let viewModel = UsageViewModel(aggregator: aggregator, coordinator: coordinator)
 
         await viewModel.start()
+        #expect(await eventually {
+            viewModel.snapshot.freshness == .failed("database unavailable")
+        })
 
         #expect(viewModel.snapshot.total == .zero)
         #expect(viewModel.snapshot.projects.isEmpty)
@@ -82,12 +89,28 @@ struct UsageViewModelTests {
             .success(makeSnapshot(range: .sevenDays, total: 4)),
         ])
         let coordinator = CoordinatorSpy()
-        let viewModel = UsageViewModel(aggregator: aggregator, coordinator: coordinator)
+        let notifier = NotifierSpy()
+        let viewModel = UsageViewModel(
+            aggregator: aggregator,
+            coordinator: coordinator,
+            notifier: notifier
+        )
         await viewModel.start()
+        await settleAsyncWork()
+        #expect(await aggregator.requestedRanges.count == 1)
+        #expect(await notifier.evaluations.count == 1)
 
         await viewModel.selectRange(.sevenDays)
+        #expect(await aggregator.requestedRanges.count == 2)
+        #expect(await notifier.evaluations.count == 2)
+
         await viewModel.retry()
+        await settleAsyncWork()
+        #expect(await aggregator.requestedRanges.count == 3)
+        #expect(await notifier.evaluations.count == 3)
+
         await viewModel.rebuildIndex()
+        await settleAsyncWork()
 
         #expect(viewModel.selectedRange == .sevenDays)
         #expect(viewModel.snapshot.total.total == 4)
@@ -103,6 +126,7 @@ struct UsageViewModelTests {
         let coordinator = CoordinatorSpy(rebuildFailure: "rebuild failed")
         let viewModel = UsageViewModel(aggregator: aggregator, coordinator: coordinator)
         await viewModel.start()
+        await settleAsyncWork()
 
         await viewModel.rebuildIndex()
 
@@ -115,6 +139,73 @@ struct UsageViewModelTests {
     }
 
     @MainActor
+    @Test func lateTodaySuccessCannotOverwriteNewerSevenDayResultOrNotifyItsLimits() async {
+        let today = makeSnapshot(total: 10, limits: [makeLimit(usedPercent: 10)])
+        let sevenDays = makeSnapshot(
+            range: .sevenDays,
+            total: 70,
+            limits: [makeLimit(usedPercent: 70)]
+        )
+        let aggregator = GatedAggregator()
+        let coordinator = CoordinatorSpy()
+        let notifier = NotifierSpy()
+        let viewModel = UsageViewModel(
+            aggregator: aggregator,
+            coordinator: coordinator,
+            notifier: notifier
+        )
+
+        await viewModel.start()
+        #expect(await eventually { await aggregator.hasRequest(for: .today) })
+        let rangeSelection = Task { @MainActor in
+            await viewModel.selectRange(.sevenDays)
+        }
+        #expect(await eventually { await aggregator.hasRequest(for: .sevenDays) })
+
+        await aggregator.succeed(range: .sevenDays, with: sevenDays)
+        await rangeSelection.value
+        await aggregator.succeed(range: .today, with: today)
+        await settleAsyncWork()
+
+        #expect(viewModel.selectedRange == .sevenDays)
+        #expect(viewModel.snapshot == sevenDays)
+        #expect(await notifier.evaluations == [sevenDays.limits])
+    }
+
+    @MainActor
+    @Test func lateTodayFailureCannotMakeNewerSevenDayResultStale() async {
+        let sevenDays = makeSnapshot(
+            range: .sevenDays,
+            total: 75,
+            limits: [makeLimit(usedPercent: 75)]
+        )
+        let aggregator = GatedAggregator()
+        let coordinator = CoordinatorSpy()
+        let notifier = NotifierSpy()
+        let viewModel = UsageViewModel(
+            aggregator: aggregator,
+            coordinator: coordinator,
+            notifier: notifier
+        )
+
+        await viewModel.start()
+        #expect(await eventually { await aggregator.hasRequest(for: .today) })
+        let rangeSelection = Task { @MainActor in
+            await viewModel.selectRange(.sevenDays)
+        }
+        #expect(await eventually { await aggregator.hasRequest(for: .sevenDays) })
+
+        await aggregator.succeed(range: .sevenDays, with: sevenDays)
+        await rangeSelection.value
+        await aggregator.fail(range: .today, message: "old request failed")
+        await settleAsyncWork()
+
+        #expect(viewModel.selectedRange == .sevenDays)
+        #expect(viewModel.snapshot == sevenDays)
+        #expect(await notifier.evaluations == [sevenDays.limits])
+    }
+
+    @MainActor
     @Test func deinitializationCancelsUpdateConsumption() async {
         let probe = TerminationProbe()
         let aggregator = AggregatorSpy([.success(makeSnapshot(total: 1))])
@@ -124,10 +215,52 @@ struct UsageViewModelTests {
             coordinator: coordinator
         )
         await viewModel?.start()
+        await settleAsyncWork()
 
         viewModel = nil
 
         #expect(await eventually { probe.isTerminated })
+    }
+}
+
+private actor GatedAggregator: UsageAggregating {
+    private struct PendingRequest {
+        let range: TokenRange
+        let continuation: CheckedContinuation<DashboardSnapshot, any Error>
+    }
+
+    private var pendingRequests: [PendingRequest] = []
+
+    func snapshot(
+        range: TokenRange,
+        now: Date,
+        calendar: Calendar
+    ) async throws -> DashboardSnapshot {
+        try await withCheckedThrowingContinuation { continuation in
+            pendingRequests.append(PendingRequest(range: range, continuation: continuation))
+        }
+    }
+
+    func hasRequest(for range: TokenRange) -> Bool {
+        pendingRequests.contains { $0.range == range }
+    }
+
+    func succeed(range: TokenRange, with snapshot: DashboardSnapshot) {
+        guard let index = pendingRequests.firstIndex(where: { $0.range == range }) else {
+            Issue.record("No pending request for \(range)")
+            return
+        }
+        pendingRequests.remove(at: index).continuation.resume(returning: snapshot)
+    }
+
+    func fail(range: TokenRange, message: String) {
+        guard let index = pendingRequests.firstIndex(where: { $0.range == range }) else {
+            Issue.record("No pending request for \(range)")
+            return
+        }
+        pendingRequests.remove(at: index).continuation.resume(
+            throwing: SpyFailure(message: message)
+        )
     }
 }
 
@@ -183,6 +316,7 @@ private actor CoordinatorSpy: IngestionControlling {
 
     func start() async {
         startCount += 1
+        continuation.yield(.completed)
     }
 
     func updates() async -> AsyncStream<IngestionUpdate> {
@@ -191,6 +325,7 @@ private actor CoordinatorSpy: IngestionControlling {
 
     func rescanAll() async {
         rescanCount += 1
+        continuation.yield(.completed)
     }
 
     func rebuildIndex() async throws {
@@ -198,6 +333,7 @@ private actor CoordinatorSpy: IngestionControlling {
         if let rebuildFailure {
             throw SpyFailure(message: rebuildFailure)
         }
+        continuation.yield(.completed)
     }
 
     func stop() async {
@@ -246,6 +382,10 @@ private func eventually(
         try? await Task.sleep(for: .milliseconds(10))
     }
     return false
+}
+
+private func settleAsyncWork() async {
+    try? await Task.sleep(for: .milliseconds(50))
 }
 
 private func makeSnapshot(

@@ -32,6 +32,7 @@ final class UsageViewModel {
     private nonisolated(unsafe) var updateTask: Task<Void, Never>?
     private var hasStarted = false
     private var lastSuccessfulAt: Date?
+    private var refreshGeneration: UInt64 = 0
 
     init(
         aggregator: any UsageAggregating,
@@ -46,20 +47,14 @@ final class UsageViewModel {
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
-        await coordinator.start()
-        await refresh()
         let updates = await coordinator.updates()
         updateTask = Task { [weak self] in
             for await update in updates {
-                guard let self, !Task.isCancelled else { return }
-                switch update {
-                case .completed:
-                    await self.refresh()
-                case let .failed(message):
-                    self.apply(IngestionFailure(message: message))
-                }
+                guard !Task.isCancelled else { return }
+                await self?.handle(update)
             }
         }
+        await coordinator.start()
     }
 
     func selectRange(_ range: TokenRange) async {
@@ -69,30 +64,49 @@ final class UsageViewModel {
 
     func retry() async {
         await coordinator.rescanAll()
-        await refresh()
     }
 
     func rebuildIndex() async {
         do {
             try await coordinator.rebuildIndex()
-            await refresh()
         } catch {
-            apply(error)
+            invalidateRefreshAndApply(error)
+        }
+    }
+
+    private func handle(_ update: IngestionUpdate) async {
+        switch update {
+        case .completed:
+            await refresh()
+        case let .failed(message):
+            invalidateRefreshAndApply(IngestionFailure(message: message))
         }
     }
 
     private func refresh(now: Date = .now, calendar: Calendar = .current) async {
+        let range = selectedRange
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+
         do {
-            snapshot = try await aggregator.snapshot(
-                range: selectedRange,
+            let refreshedSnapshot = try await aggregator.snapshot(
+                range: range,
                 now: now,
                 calendar: calendar
             )
+            guard generation == refreshGeneration, range == selectedRange else { return }
+            snapshot = refreshedSnapshot
             lastSuccessfulAt = now
-            await notifier.evaluate(snapshot.limits)
+            await notifier.evaluate(refreshedSnapshot.limits)
         } catch {
+            guard generation == refreshGeneration, range == selectedRange else { return }
             apply(error)
         }
+    }
+
+    private func invalidateRefreshAndApply(_ error: Error) {
+        refreshGeneration &+= 1
+        apply(error)
     }
 
     private func apply(_ error: Error) {
