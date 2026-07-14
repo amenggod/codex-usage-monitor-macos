@@ -55,7 +55,7 @@ actor UsageRepository {
     func migrate() throws {
         let version = try userVersion()
         guard version == 0 || version == 1 else {
-            try resetIndex()
+            try resetIndex(preserveNotificationReceipts: false)
             try migrate()
             return
         }
@@ -421,9 +421,12 @@ actor UsageRepository {
         return rows
     }
 
-    func resetIndex() throws {
+    func resetIndex(preserveNotificationReceipts: Bool = true) throws {
         try database.execute("BEGIN IMMEDIATE")
         do {
+            if !preserveNotificationReceipts {
+                try database.execute("DROP TABLE IF EXISTS notification_receipts")
+            }
             try database.execute("DROP TABLE IF EXISTS rate_limits")
             try database.execute("DROP TABLE IF EXISTS cumulative_usage")
             try database.execute("DROP TABLE IF EXISTS file_cursors")

@@ -136,7 +136,7 @@ struct UsageRepositoryTests {
     }
 
     @Test
-    func futureSchemaRecoveryPreservesNotificationReceipts() async throws {
+    func futureSchemaRecoveryRecreatesNotificationReceipts() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }
         let repository = try UsageRepository(url: databaseURL)
@@ -149,8 +149,34 @@ struct UsageRepositoryTests {
 
         try await repository.migrate()
 
-        #expect(try await repository.notificationWasSent("five-hours|2000|20"))
+        #expect(try await !repository.notificationWasSent("five-hours|2000|20"))
+        try await repository.markNotificationSent(
+            "week|4000|10",
+            sentAt: Date(timeIntervalSince1970: 3_000)
+        )
+        #expect(try await repository.notificationWasSent("week|4000|10"))
         #expect(try await repository.queryUsage(from: nil, to: .distantFuture).isEmpty)
+    }
+
+    @Test
+    func futureIncompatibleReceiptSchemaIsRecreatedBeforeMigrationCompletes() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        try createFutureReceiptDatabase(at: databaseURL)
+        let repository = try UsageRepository(url: databaseURL)
+
+        try await repository.migrate()
+
+        #expect(try receiptColumnNames(at: databaseURL) == ["receipt_key", "sent_at"])
+        do {
+            try await repository.markNotificationSent(
+                "five-hours|6000|20",
+                sentAt: Date(timeIntervalSince1970: 5_000)
+            )
+            #expect(try await repository.notificationWasSent("five-hours|6000|20"))
+        } catch {
+            Issue.record("current notification receipt schema should be writable: \(error)")
+        }
     }
 
     @Test
@@ -399,6 +425,66 @@ struct UsageRepositoryTests {
         }
         bytes.replaceSubrange(pageStart..<pageEnd, with: repeatElement(UInt8(0), count: pageSize))
         try bytes.write(to: url, options: .atomic)
+    }
+
+    private func createFutureReceiptDatabase(at url: URL) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create future schema fixture")
+        }
+        defer { sqlite3_close(handle) }
+        try executeRawSQL(
+            """
+            CREATE TABLE notification_receipts (
+              future_key INTEGER PRIMARY KEY,
+              future_payload BLOB NOT NULL
+            );
+            INSERT INTO notification_receipts (future_key, future_payload)
+            VALUES (1, X'0102');
+            PRAGMA user_version = 99;
+            """,
+            handle: handle
+        )
+    }
+
+    private func receiptColumnNames(at url: URL) throws -> [String] {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not inspect receipt schema")
+        }
+        defer { sqlite3_close(handle) }
+
+        var statement: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(
+            handle,
+            "PRAGMA table_info(notification_receipts)",
+            -1,
+            &statement,
+            nil
+        )
+        guard prepareResult == SQLITE_OK, let statement else {
+            throw SQLiteError(code: prepareResult, message: "could not inspect receipt columns")
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var columns: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let value = sqlite3_column_text(statement, 1) else { continue }
+            columns.append(String(cString: value))
+        }
+        return columns
     }
 
     private func setUserVersion(_ version: Int, at url: URL) throws {
