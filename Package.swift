@@ -1,5 +1,21 @@
 // swift-tools-version: 6.0
+import Foundation
 import PackageDescription
+
+let commandLineToolsTestingLibraryDirectory = "/Library/Developer/CommandLineTools/Library/Developer/usr/lib"
+let commandLineToolsTestingInteropLibrary = "\(commandLineToolsTestingLibraryDirectory)/lib_TestingInterop.dylib"
+let testingLinkerSettings: [LinkerSetting] = FileManager.default.fileExists(
+    atPath: commandLineToolsTestingInteropLibrary
+) ? [
+    .unsafeFlags(
+        [
+            "-L\(commandLineToolsTestingLibraryDirectory)",
+            "-Xlinker", "-rpath",
+            "-Xlinker", commandLineToolsTestingLibraryDirectory
+        ],
+        .when(platforms: [.macOS])
+    )
+] : []
 
 let package = Package(
     name: "CodexUsageMonitor",
@@ -22,7 +38,8 @@ let package = Package(
                 "CodexUsageMonitor",
                 .product(name: "Testing", package: "swift-testing")
             ],
-            resources: [.copy("Fixtures")]
+            resources: [.copy("Fixtures")],
+            linkerSettings: testingLinkerSettings
         )
     ],
     swiftLanguageModes: [.v6]
