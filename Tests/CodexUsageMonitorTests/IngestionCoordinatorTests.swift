@@ -68,6 +68,51 @@ struct IngestionCoordinatorTests {
     }
 
     @Test
+    func watcherEndingDuringScanCannotBeHiddenByScanCompletion() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let root = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try writeSyntheticLog(at: root.appending(path: "gated.jsonl"))
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let watcher = ControlledWatcher()
+        let recoveredWatcher = ControlledWatcher()
+        let scanGate = OneShotScanGate()
+        let coordinator = IngestionCoordinator(
+            roots: [root],
+            repository: repository,
+            scanner: scanner,
+            watcher: watcher,
+            watcherFactory: { _ in recoveredWatcher },
+            recoveryDelay: .milliseconds(100),
+            scanFileOperation: { url in
+                await scanGate.suspendFirstScan()
+                return try await scanner.scan(url: url)
+            }
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+
+        let startTask = Task { await coordinator.start() }
+        await scanGate.waitUntilSuspended()
+        watcher.finishUnexpectedly()
+        #expect(await recorder.waitForCount(1))
+        #expect(await recorder.value(at: 0) == .failed("Codex 会话文件监听器意外停止"))
+
+        await scanGate.resume()
+        await startTask.value
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(await recorder.count == 1)
+        #expect(await recorder.waitForCount(2, attempts: 20))
+        #expect(recoveredWatcher.eventsCallCount == 1)
+        #expect(await recorder.value(at: 1) == .completed)
+
+        await coordinator.stop()
+    }
+
+    @Test
     func initialScanRecursesAcrossLiveAndArchivedRoots() async throws {
         let fixture = try CoordinatorFixture(createArchivedRoot: true)
         defer { fixture.remove() }
@@ -224,6 +269,77 @@ struct IngestionCoordinatorTests {
     }
 
     @Test
+    func rebuildWaitsForInflightScanAndConsumesEventArrivingDuringMerge() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let root = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let logURL = root.appending(path: "sequenced.jsonl")
+        try writeSyntheticLog(at: logURL)
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let watcher = ControlledWatcher()
+        let scanSequence = SequencedScanGate(gatedCalls: [2, 3, 4])
+        let resetGate = SuspensionGate()
+        let coordinator = IngestionCoordinator(
+            roots: [root],
+            repository: repository,
+            scanner: scanner,
+            watcher: watcher,
+            watcherFactory: { _ in ControlledWatcher() },
+            debounceDelay: .milliseconds(10),
+            resetIndexOperation: {
+                try await repository.resetIndex()
+                await resetGate.suspend()
+            },
+            scanFileOperation: { url in
+                await scanSequence.beforeScan()
+                return try await scanner.scan(url: url)
+            }
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+        await coordinator.start()
+        #expect(await recorder.waitForCount(1))
+
+        try appendSyntheticToken(to: logURL, second: 2, cumulativeTotal: 2)
+        watcher.emit()
+        await scanSequence.waitUntilCall(2)
+
+        let rebuildTask = Task { try await coordinator.rebuildIndex() }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(await !resetGate.isSuspended)
+
+        await scanSequence.resume(call: 2)
+        await resetGate.waitUntilSuspended()
+        #expect(await recorder.count == 1)
+
+        watcher.emit()
+        await resetGate.resume()
+        await scanSequence.waitUntilCall(3)
+        try appendSyntheticToken(to: logURL, second: 3, cumulativeTotal: 3)
+        watcher.emit()
+        await scanSequence.resume(call: 3)
+
+        await scanSequence.waitUntilCall(4)
+        try appendSyntheticToken(to: logURL, second: 4, cumulativeTotal: 4)
+        watcher.emit()
+        await scanSequence.resume(call: 4)
+
+        try await rebuildTask.value
+        #expect(await scanSequence.callCount >= 5)
+        #expect(await recorder.waitForCount(2))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await recorder.count == 2)
+        #expect(try await repository.queryUsage(from: nil, to: .distantFuture)
+            .map(\.usage.total)
+            .reduce(0, +) == 4)
+
+        await coordinator.stop()
+    }
+
+    @Test
     func rebuildFailurePublishesFailedAndSchedulesRecovery() async throws {
         let directoryURL = try temporaryCoordinatorDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
@@ -287,6 +403,26 @@ private func temporaryCoordinatorDirectory() throws -> URL {
     return directoryURL
 }
 
+private func writeSyntheticLog(at url: URL) throws {
+    let contents =
+        """
+        {"timestamp":"2026-07-14T01:00:00Z","type":"session_meta","payload":{"id":"gated","cwd":"/synthetic/gated"}}
+        {"timestamp":"2026-07-14T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1},"total_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1}}}}
+        """ + "\n"
+    try Data(contents.utf8).write(to: url)
+}
+
+private func appendSyntheticToken(to url: URL, second: Int, cumulativeTotal: Int64) throws {
+    let line =
+        """
+        {"timestamp":"2026-07-14T01:00:\(String(format: "%02d", second))Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1},"total_token_usage":{"input_tokens":\(cumulativeTotal),"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":\(cumulativeTotal)}}}}
+        """ + "\n"
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(line.utf8))
+}
+
 private final class ControlledWatcher: SessionFileWatching, @unchecked Sendable {
     private let lock = NSLock()
     private let pair = AsyncStream<Void>.makeStream()
@@ -320,12 +456,65 @@ private final class ControlledWatcher: SessionFileWatching, @unchecked Sendable 
     func emit() {
         pair.continuation.yield(())
     }
+
+    func finishUnexpectedly() {
+        pair.continuation.finish()
+    }
+}
+
+private actor OneShotScanGate {
+    private let gate = SuspensionGate()
+    private var shouldSuspend = true
+
+    func suspendFirstScan() async {
+        guard shouldSuspend else { return }
+        shouldSuspend = false
+        await gate.suspend()
+    }
+
+    func waitUntilSuspended() async {
+        await gate.waitUntilSuspended()
+    }
+
+    func resume() async {
+        await gate.resume()
+    }
+}
+
+private actor SequencedScanGate {
+    private let gatedCalls: Set<Int>
+    private var gates: [Int: SuspensionGate] = [:]
+    private(set) var callCount = 0
+
+    init(gatedCalls: Set<Int>) {
+        self.gatedCalls = gatedCalls
+        for call in gatedCalls {
+            gates[call] = SuspensionGate()
+        }
+    }
+
+    func beforeScan() async {
+        callCount += 1
+        guard gatedCalls.contains(callCount), let gate = gates[callCount] else { return }
+        await gate.suspend()
+    }
+
+    func waitUntilCall(_ call: Int) async {
+        guard let gate = gates[call] else { return }
+        await gate.waitUntilSuspended()
+    }
+
+    func resume(call: Int) async {
+        await gates[call]?.resume()
+    }
 }
 
 private actor SuspensionGate {
     private var suspended = false
     private var suspensionWaiters: [CheckedContinuation<Void, Never>] = []
     private var resumeContinuation: CheckedContinuation<Void, Never>?
+
+    var isSuspended: Bool { suspended }
 
     func suspend() async {
         suspended = true
