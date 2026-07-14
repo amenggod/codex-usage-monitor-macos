@@ -24,14 +24,14 @@ struct MenuBarFormattingTests {
         let project = ProjectUsage(
             id: "secret-project",
             displayName: "project",
-            fullPath: "/Users/alice/ClientSecret/project",
+            fullPath: "/synthetic/ClientSecret/project",
             usage: TokenUsage(input: 42, cachedInput: 0, output: 0, reasoningOutput: 0, total: 42)
         )
 
         let label = ProjectRowAccessibilityFormatter.label(for: project)
 
         #expect(label == "project，42 Token")
-        #expect(!label.contains("/Users/alice"))
+        #expect(!label.contains("/synthetic/ClientSecret/project"))
         #expect(!label.contains("ClientSecret"))
     }
 }
