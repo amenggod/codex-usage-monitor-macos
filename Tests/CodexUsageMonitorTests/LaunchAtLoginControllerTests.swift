@@ -1,9 +1,89 @@
 import Foundation
 import Testing
 @testable import CodexUsageMonitor
+@testable import CodexUsageShared
 
 @Suite("LaunchAtLoginControllerTests")
 struct LaunchAtLoginControllerTests {
+    @Test func loginHelperFindsContainingMainApplication() {
+        let helper = URL(
+            fileURLWithPath: "/Applications/Codex Usage Monitor.app/Contents/Library/LoginItems/CodexUsageMonitorLoginItem.app"
+        )
+
+        #expect(
+            LoginItemMainApplicationLocator.mainApplicationURL(from: helper).path
+                == "/Applications/Codex Usage Monitor.app"
+        )
+    }
+
+    @Test func controllerUsesHelperServiceAndUnregistersLegacyMainApp() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(enabled: false)
+        let legacy = LaunchAtLoginAdapterSpy(enabled: true)
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        try controller.migrateLegacyRegistrationIfNeeded()
+        try controller.setEnabled(true)
+
+        #expect(legacy.operations == [.unregister])
+        #expect(helper.operations == [.register])
+    }
+
+    @Test func successfulLegacyMigrationPersistsAndRunsOnlyOnce() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let firstLegacy = LaunchAtLoginAdapterSpy(enabled: true)
+        let firstController = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(enabled: false),
+            legacyAdapter: firstLegacy,
+            defaults: suite.defaults
+        )
+
+        try firstController.migrateLegacyRegistrationIfNeeded()
+
+        let secondLegacy = LaunchAtLoginAdapterSpy(enabled: true)
+        let secondController = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(enabled: false),
+            legacyAdapter: secondLegacy,
+            defaults: suite.defaults
+        )
+        try secondController.migrateLegacyRegistrationIfNeeded()
+
+        #expect(firstLegacy.operations == [.unregister])
+        #expect(secondLegacy.operations.isEmpty)
+    }
+
+    @Test func failedLegacyMigrationDoesNotPersistCompletion() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let failingLegacy = LaunchAtLoginAdapterSpy(enabled: true, unregisterFails: true)
+        let failingController = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(enabled: false),
+            legacyAdapter: failingLegacy,
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginTestFailure.self) {
+            try failingController.migrateLegacyRegistrationIfNeeded()
+        }
+
+        let retryLegacy = LaunchAtLoginAdapterSpy(enabled: true)
+        let retryController = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(enabled: false),
+            legacyAdapter: retryLegacy,
+            defaults: suite.defaults
+        )
+        try retryController.migrateLegacyRegistrationIfNeeded()
+
+        #expect(failingLegacy.operations == [.unregister])
+        #expect(retryLegacy.operations == [.unregister])
+    }
+
     @Test func reflectsAdapterStateAndRoutesEnableAndDisable() throws {
         let adapter = LaunchAtLoginAdapterSpy(enabled: false)
         let controller = LaunchAtLoginController(adapter: adapter)
@@ -35,6 +115,11 @@ struct LaunchAtLoginControllerTests {
         }
         #expect(controller.isEnabled)
     }
+}
+
+private func isolatedDefaults() throws -> (defaults: UserDefaults, name: String) {
+    let name = "LaunchAtLoginControllerTests.\(UUID().uuidString)"
+    return (try #require(UserDefaults(suiteName: name)), name)
 }
 
 private final class LaunchAtLoginAdapterSpy: @unchecked Sendable, LaunchAtLoginServiceAdapting {
