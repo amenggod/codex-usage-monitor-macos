@@ -1,3 +1,4 @@
+import CodexUsageShared
 import Foundation
 
 enum LiveDependencies {
@@ -32,10 +33,24 @@ enum LiveDependencies {
                 repository: repository,
                 sender: UserNotificationSender()
             )
+            let aggregator = UsageAggregator(repository: repository)
+            let widgetPublisher: any WidgetSnapshotPublishing
+            do {
+                widgetPublisher = WidgetSnapshotPublisher(
+                    aggregator: aggregator,
+                    store: try WidgetSnapshotStore.appGroup(),
+                    reloader: SystemWidgetTimelineReloader()
+                )
+            } catch {
+                widgetPublisher = UnavailableWidgetSnapshotPublisher(
+                    message: "小组件共享不可用"
+                )
+            }
             return UsageViewModel(
-                aggregator: UsageAggregator(repository: repository),
+                aggregator: aggregator,
                 coordinator: coordinator,
-                notifier: notifier
+                notifier: notifier,
+                widgetPublisher: widgetPublisher
             )
         } catch {
             return makeFailureViewModel(error: error)

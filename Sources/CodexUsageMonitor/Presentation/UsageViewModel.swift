@@ -25,10 +25,12 @@ final class UsageViewModel {
     private(set) var snapshot: DashboardSnapshot = .loading
     private(set) var todayTotal: TokenUsage = .zero
     private(set) var selectedRange: TokenRange = .today
+    private(set) var widgetSharingStatus: WidgetSharingStatus?
 
     private let aggregator: any UsageAggregating
     private let coordinator: any IngestionControlling
     private let notifier: any LimitNotifying
+    private let widgetPublisher: (any WidgetSnapshotPublishing)?
     @ObservationIgnored
     private nonisolated(unsafe) var updateTask: Task<Void, Never>?
     private var hasStarted = false
@@ -38,11 +40,13 @@ final class UsageViewModel {
     init(
         aggregator: any UsageAggregating,
         coordinator: any IngestionControlling,
-        notifier: any LimitNotifying = NoopLimitNotifier()
+        notifier: any LimitNotifying = NoopLimitNotifier(),
+        widgetPublisher: (any WidgetSnapshotPublishing)? = nil
     ) {
         self.aggregator = aggregator
         self.coordinator = coordinator
         self.notifier = notifier
+        self.widgetPublisher = widgetPublisher
     }
 
     func start() async {
@@ -135,6 +139,9 @@ final class UsageViewModel {
             }
             lastSuccessfulAt = now
             await notifier.evaluate(refreshedSnapshot.limits)
+            if let widgetPublisher {
+                widgetSharingStatus = await widgetPublisher.publish(now: now, calendar: calendar)
+            }
         } catch {
             guard generation == refreshGeneration, range == selectedRange else { return }
             apply(error)

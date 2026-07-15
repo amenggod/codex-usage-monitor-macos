@@ -75,6 +75,24 @@ struct UsageViewModelTests {
     }
 
     @MainActor
+    @Test func unavailableWidgetSharingDoesNotReplaceSuccessfulDashboard() async {
+        let expected = makeSnapshot(total: 10, limits: [makeLimit(usedPercent: 35)])
+        let viewModel = UsageViewModel(
+            aggregator: AggregatorSpy([.success(expected)]),
+            coordinator: CoordinatorSpy(),
+            widgetPublisher: UnavailableWidgetSnapshotPublisher(
+                message: "小组件共享不可用"
+            )
+        )
+
+        await viewModel.start()
+        await settleAsyncWork()
+
+        #expect(viewModel.snapshot == expected)
+        #expect(viewModel.widgetSharingStatus == .unavailable("小组件共享不可用"))
+    }
+
+    @MainActor
     @Test func completedUpdateRefreshesTheDashboard() async {
         let initial = makeSnapshot(total: 10)
         let refreshed = makeSnapshot(total: 25)
