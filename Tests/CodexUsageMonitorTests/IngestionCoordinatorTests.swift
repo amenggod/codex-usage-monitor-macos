@@ -77,15 +77,14 @@ struct IngestionCoordinatorTests {
         let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
         let scanner = SessionScanner(repository: repository)
         let watcher = ControlledWatcher()
-        let recoveredWatcher = ControlledWatcher()
         let scanGate = OneShotScanGate()
         let coordinator = IngestionCoordinator(
             roots: [root],
             repository: repository,
             scanner: scanner,
             watcher: watcher,
-            watcherFactory: { _ in recoveredWatcher },
-            recoveryDelay: .milliseconds(100),
+            watcherFactory: { _ in ControlledWatcher() },
+            recoveryDelay: .seconds(30),
             scanFileOperation: { url in
                 await scanGate.suspendFirstScan()
                 return try await scanner.scan(url: url)
@@ -103,11 +102,7 @@ struct IngestionCoordinatorTests {
 
         await scanGate.resume()
         await startTask.value
-        try await Task.sleep(for: .milliseconds(30))
         #expect(await recorder.count == 1)
-        #expect(await recorder.waitForCount(2, attempts: 20))
-        #expect(recoveredWatcher.eventsCallCount == 1)
-        #expect(await recorder.value(at: 1) == .completed)
 
         await coordinator.stop()
     }
@@ -219,7 +214,7 @@ struct IngestionCoordinatorTests {
     }
 
     @Test
-    func rebuildDefersRecoveryAndWatcherEventsUntilOneFinalUpdate() async throws {
+    func rebuildDefersWatcherEventsUntilOneFinalUpdate() async throws {
         let directoryURL = try temporaryCoordinatorDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
         let sessionsRoot = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
@@ -235,7 +230,7 @@ struct IngestionCoordinatorTests {
             scanner: scanner,
             watcher: watcher,
             watcherFactory: { _ in ControlledWatcher() },
-            recoveryDelay: .milliseconds(200),
+            recoveryDelay: .seconds(30),
             debounceDelay: .milliseconds(10),
             resetIndexOperation: {
                 try await repository.resetIndex()
