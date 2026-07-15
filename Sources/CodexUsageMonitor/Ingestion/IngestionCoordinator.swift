@@ -2,6 +2,8 @@ import Foundation
 
 enum IngestionUpdate: Equatable, Sendable {
     case completed
+    case partial(failedFiles: Int)
+    case rebuilding(completed: Int, total: Int)
     case failed(String)
 }
 
@@ -23,6 +25,11 @@ actor IngestionCoordinator {
     private struct DiscoveredFiles: Sendable {
         let files: [(url: URL, metadata: FileMetadata)]
         let hasMissingRoot: Bool
+    }
+
+    private struct ScanOutcome: Sendable {
+        let hasMissingRoot: Bool
+        let failedFiles: Int
     }
 
     private let roots: [URL]
@@ -98,10 +105,10 @@ actor IngestionCoordinator {
 
         do {
             let activeWatcher = try startWatching()
-            guard let missingRoot = try await performRegularScan(forceAll: true) else { return }
-            scheduleRecoveryIfNeeded(missingRoot: missingRoot)
+            guard let outcome = try await performRegularScan(forceAll: true) else { return }
+            scheduleRecoveryIfNeeded(outcome)
             guard watcherIsActive, watcher === activeWatcher else { return }
-            updateContinuation.yield(.completed)
+            publish(outcome)
         } catch {
             updateContinuation.yield(.failed(error.localizedDescription))
             if watcherNeedsRecovery {
@@ -140,25 +147,29 @@ actor IngestionCoordinator {
             try await resetIndexOperation()
             try await repository.migrate()
             fileMetadata.removeAll()
-            var missingRoot = try await scanChangedFiles(
+            var outcome = try await scanChangedFiles(
                 forceAll: true,
                 generation: rebuildGeneration,
                 allowsRebuild: true
             )
             while pendingRescanDuringRebuild {
                 pendingRescanDuringRebuild = false
-                missingRoot = try await scanChangedFiles(
+                let pendingOutcome = try await scanChangedFiles(
                     forceAll: false,
                     generation: rebuildGeneration,
                     allowsRebuild: true
-                ) || missingRoot
+                )
+                outcome = ScanOutcome(
+                    hasMissingRoot: outcome.hasMissingRoot || pendingOutcome.hasMissingRoot,
+                    failedFiles: pendingOutcome.failedFiles
+                )
             }
             rebuilding = false
-            scheduleRecoveryIfNeeded(missingRoot: missingRoot)
+            scheduleRecoveryIfNeeded(outcome)
             if watcherNeedsRecovery {
                 scheduleWatcherRecovery()
             }
-            updateContinuation.yield(.completed)
+            publish(outcome)
         } catch {
             rebuilding = false
             pendingRescanDuringRebuild = false
@@ -243,13 +254,13 @@ actor IngestionCoordinator {
 
         do {
             let recoveredWatcher = try startWatching()
-            guard let missingRoot = try await performRegularScan(forceAll: true) else {
+            guard let outcome = try await performRegularScan(forceAll: true) else {
                 watcherNeedsRecovery = true
                 return
             }
-            scheduleRecoveryIfNeeded(missingRoot: missingRoot)
+            scheduleRecoveryIfNeeded(outcome)
             guard watcherIsActive, watcher === recoveredWatcher else { return }
-            updateContinuation.yield(.completed)
+            publish(outcome)
         } catch {
             updateContinuation.yield(.failed(error.localizedDescription))
             scheduleWatcherRecovery()
@@ -280,15 +291,15 @@ actor IngestionCoordinator {
             return
         }
         do {
-            guard let missingRoot = try await performRegularScan(forceAll: forceAll) else { return }
-            scheduleRecoveryIfNeeded(missingRoot: missingRoot)
-            updateContinuation.yield(.completed)
+            guard let outcome = try await performRegularScan(forceAll: forceAll) else { return }
+            scheduleRecoveryIfNeeded(outcome)
+            publish(outcome)
         } catch {
             updateContinuation.yield(.failed(error.localizedDescription))
         }
     }
 
-    private func performRegularScan(forceAll: Bool) async throws -> Bool? {
+    private func performRegularScan(forceAll: Bool) async throws -> ScanOutcome? {
         guard !rebuilding else {
             pendingRescanDuringRebuild = true
             return nil
@@ -315,23 +326,46 @@ actor IngestionCoordinator {
         forceAll: Bool,
         generation: UInt64,
         allowsRebuild: Bool
-    ) async throws -> Bool {
+    ) async throws -> ScanOutcome {
         try validateScan(generation: generation, allowsRebuild: allowsRebuild)
         let discovered = try discoverJSONLFiles()
         let discoveredPaths = Set(discovered.files.map { $0.url.path })
+        var failedPaths: Set<String> = []
+        var completedFiles = 0
+
+        if allowsRebuild {
+            updateContinuation.yield(.rebuilding(completed: 0, total: discovered.files.count))
+        }
 
         for file in discovered.files {
             try validateScan(generation: generation, allowsRebuild: allowsRebuild)
             let path = file.url.path
-            guard forceAll || fileMetadata[path] != file.metadata else { continue }
-            _ = try await scanFileOperation(file.url)
-            try validateScan(generation: generation, allowsRebuild: allowsRebuild)
-            fileMetadata[path] = file.metadata
+            if forceAll || fileMetadata[path] != file.metadata {
+                do {
+                    _ = try await scanFileOperation(file.url)
+                    try validateScan(generation: generation, allowsRebuild: allowsRebuild)
+                    fileMetadata[path] = file.metadata
+                } catch let error as ScanInvalidated {
+                    throw error
+                } catch {
+                    failedPaths.insert(path)
+                }
+            }
+            completedFiles += 1
+            if allowsRebuild {
+                updateContinuation.yield(.rebuilding(
+                    completed: completedFiles,
+                    total: discovered.files.count
+                ))
+            }
         }
 
         try validateScan(generation: generation, allowsRebuild: allowsRebuild)
         fileMetadata = fileMetadata.filter { discoveredPaths.contains($0.key) }
-        return discovered.hasMissingRoot
+        return ScanOutcome(
+            hasMissingRoot: discovered.hasMissingRoot,
+            failedFiles: failedPaths.count
+        )
     }
 
     private func validateScan(generation: UInt64, allowsRebuild: Bool) throws {
@@ -404,10 +438,10 @@ actor IngestionCoordinator {
         return DiscoveredFiles(files: files, hasMissingRoot: missingRoot)
     }
 
-    private func scheduleRecoveryIfNeeded(missingRoot: Bool) {
+    private func scheduleRecoveryIfNeeded(_ outcome: ScanOutcome) {
         missingRootRecoveryTask?.cancel()
         missingRootRecoveryTask = nil
-        guard missingRoot, !stopped else { return }
+        guard outcome.hasMissingRoot || outcome.failedFiles > 0, !stopped else { return }
 
         let delay = recoveryDelay
         missingRootRecoveryTask = Task { [weak self, delay] in
@@ -418,6 +452,14 @@ actor IngestionCoordinator {
             }
             guard !Task.isCancelled else { return }
             await self?.scanAndPublish(forceAll: false)
+        }
+    }
+
+    private func publish(_ outcome: ScanOutcome) {
+        if outcome.failedFiles > 0 {
+            updateContinuation.yield(.partial(failedFiles: outcome.failedFiles))
+        } else {
+            updateContinuation.yield(.completed)
         }
     }
 
@@ -440,12 +482,12 @@ actor IngestionCoordinator {
         do {
             try await repository.migrate()
             fileMetadata.removeAll()
-            guard let missingRoot = try await performRegularScan(forceAll: true) else { return }
-            scheduleRecoveryIfNeeded(missingRoot: missingRoot)
+            guard let outcome = try await performRegularScan(forceAll: true) else { return }
+            scheduleRecoveryIfNeeded(outcome)
             if watcherNeedsRecovery {
                 scheduleWatcherRecovery()
             }
-            updateContinuation.yield(.completed)
+            publish(outcome)
         } catch {
             updateContinuation.yield(.failed(error.localizedDescription))
             scheduleRebuildRecovery()

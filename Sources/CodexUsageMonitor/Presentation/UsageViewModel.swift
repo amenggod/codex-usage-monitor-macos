@@ -78,9 +78,32 @@ final class UsageViewModel {
         switch update {
         case .completed:
             await refresh()
+        case let .partial(failedFiles):
+            await refresh()
+            applyPartial(failedFiles: failedFiles)
+        case let .rebuilding(completed, total):
+            refreshGeneration &+= 1
+            snapshot = DashboardSnapshot(
+                range: selectedRange,
+                total: snapshot.total,
+                projects: snapshot.projects,
+                limits: snapshot.limits,
+                freshness: .rebuilding(completed: completed, total: total)
+            )
         case let .failed(message):
             invalidateRefreshAndApply(IngestionFailure(message: message))
         }
+    }
+
+    private func applyPartial(failedFiles: Int) {
+        guard let lastSuccessfulAt else { return }
+        snapshot = DashboardSnapshot(
+            range: selectedRange,
+            total: snapshot.total,
+            projects: snapshot.projects,
+            limits: snapshot.limits,
+            freshness: .partial(lastSuccessfulAt, failedFiles: failedFiles)
+        )
     }
 
     private func refresh(now: Date = .now, calendar: Calendar = .current) async {

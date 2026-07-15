@@ -45,6 +45,48 @@ struct UsageViewModelTests {
     }
 
     @MainActor
+    @Test func partialUpdateRefreshesAvailableDataAndReportsFailedFileCount() async {
+        let initial = makeSnapshot(total: 10)
+        let refreshed = makeSnapshot(total: 25)
+        let aggregator = AggregatorSpy([.success(initial), .success(refreshed)])
+        let coordinator = CoordinatorSpy()
+        let viewModel = UsageViewModel(aggregator: aggregator, coordinator: coordinator)
+        await viewModel.start()
+        await settleAsyncWork()
+
+        await coordinator.send(.partial(failedFiles: 2))
+
+        #expect(await eventually {
+            guard viewModel.snapshot.total.total == 25,
+                  case let .partial(_, failedFiles) = viewModel.snapshot.freshness else {
+                return false
+            }
+            return failedFiles == 2
+        })
+        #expect(await aggregator.requestedRanges == [.today, .today])
+    }
+
+    @MainActor
+    @Test func rebuildingUpdateRetainsTheLastDashboardAndOnlyChangesFreshness() async {
+        let initial = makeSnapshot(total: 18, limits: [makeLimit(usedPercent: 61)])
+        let aggregator = AggregatorSpy([.success(initial)])
+        let coordinator = CoordinatorSpy()
+        let viewModel = UsageViewModel(aggregator: aggregator, coordinator: coordinator)
+        await viewModel.start()
+        await settleAsyncWork()
+
+        await coordinator.send(.rebuilding(completed: 1, total: 3))
+
+        #expect(await eventually {
+            viewModel.snapshot.freshness == .rebuilding(completed: 1, total: 3)
+        })
+        #expect(viewModel.snapshot.total == initial.total)
+        #expect(viewModel.snapshot.projects == initial.projects)
+        #expect(viewModel.snapshot.limits == initial.limits)
+        #expect(await aggregator.requestedRanges == [.today])
+    }
+
+    @MainActor
     @Test func failedUpdateRetainsTheLastSuccessfulDashboardAsStale() async {
         let initial = makeSnapshot(total: 18, limits: [makeLimit(usedPercent: 61)])
         let aggregator = AggregatorSpy([.success(initial)])

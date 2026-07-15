@@ -94,6 +94,8 @@ enum DataFreshness: Equatable, Sendable {
     case loading
     case fresh(Date)
     case stale(Date)
+    case partial(Date, failedFiles: Int)
+    case rebuilding(completed: Int, total: Int)
     case noData
     case failed(String)
 }

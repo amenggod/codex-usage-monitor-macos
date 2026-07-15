@@ -134,6 +134,74 @@ struct IngestionCoordinatorTests {
     }
 
     @Test
+    func oneBrokenFileDoesNotBlockHealthyFilesAndCanRecover() async throws {
+        let directoryURL = try temporaryCoordinatorDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let root = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try writeSyntheticLog(at: root.appending(path: "broken.jsonl"))
+        try writeSyntheticLog(at: root.appending(path: "healthy.jsonl"))
+        let repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        let scanner = SessionScanner(repository: repository)
+        let scanController = FailureIsolationController()
+        let coordinator = IngestionCoordinator(
+            roots: [root],
+            repository: repository,
+            scanner: scanner,
+            watcher: ControlledWatcher(),
+            recoveryDelay: .seconds(30),
+            scanFileOperation: { url in
+                try await scanController.scan(url, using: scanner)
+            }
+        )
+        let recorder = UpdateRecorder()
+        await recorder.observe(await coordinator.updates())
+        defer { Task { await recorder.stop() } }
+
+        await coordinator.start()
+
+        #expect(await scanController.scannedNames == ["broken.jsonl", "healthy.jsonl"])
+        #expect(await recorder.waitForCount(1))
+        #expect(await recorder.value(at: 0) == .partial(failedFiles: 1))
+
+        await scanController.allowBrokenFile()
+        await coordinator.rescanAll()
+
+        #expect(await recorder.waitForValue(.completed))
+        await coordinator.stop()
+    }
+
+    @Test
+    func rebuildPublishesProgressAfterEachDiscoveredFile() async throws {
+        let fixture = try CoordinatorFixture(createArchivedRoot: true)
+        defer { fixture.remove() }
+        try fixture.writeLog(
+            root: fixture.sessionsRoot,
+            relativePath: "first.jsonl",
+            sessionID: "first",
+            total: 10
+        )
+        try fixture.writeLog(
+            root: fixture.archivedRoot,
+            relativePath: "second.jsonl",
+            sessionID: "second",
+            total: 20
+        )
+        let recorder = await fixture.start()
+        defer { Task { await recorder.stop() } }
+        #expect(await recorder.waitForCount(1))
+
+        try await fixture.coordinator.rebuildIndex()
+
+        #expect(await recorder.waitForCount(5))
+        #expect(await recorder.value(at: 1) == .rebuilding(completed: 0, total: 2))
+        #expect(await recorder.value(at: 2) == .rebuilding(completed: 1, total: 2))
+        #expect(await recorder.value(at: 3) == .rebuilding(completed: 2, total: 2))
+        #expect(await recorder.value(at: 4) == .completed)
+        await fixture.coordinator.stop()
+    }
+
+    @Test
     func fileEventsAreDebouncedAndPublishAfterScanning() async throws {
         let fixture = try CoordinatorFixture(createArchivedRoot: true)
         defer { fixture.remove() }
@@ -255,10 +323,11 @@ struct IngestionCoordinatorTests {
 
         await gate.resume()
         try await rebuildTask.value
-        #expect(await recorder.waitForCount(2))
+        #expect(await recorder.waitForLastValue(.completed, minimumCount: 2))
+        let updateCount = await recorder.count
         try await Task.sleep(for: .milliseconds(100))
-        #expect(await recorder.count == 2)
-        #expect(await recorder.value(at: 1) == .completed)
+        #expect(await recorder.count == updateCount)
+        #expect(await recorder.occurrenceCount(of: .completed) == 2)
 
         await coordinator.stop()
     }
@@ -324,9 +393,9 @@ struct IngestionCoordinatorTests {
 
         try await rebuildTask.value
         #expect(await scanSequence.callCount >= 5)
-        #expect(await recorder.waitForCount(2))
+        #expect(await recorder.waitForLastValue(.completed, minimumCount: 2))
         try await Task.sleep(for: .milliseconds(50))
-        #expect(await recorder.count == 2)
+        #expect(await recorder.occurrenceCount(of: .completed) == 2)
         #expect(try await repository.queryUsage(from: nil, to: .distantFuture)
             .map(\.usage.total)
             .reduce(0, +) == 4)
@@ -372,17 +441,17 @@ struct IngestionCoordinatorTests {
         await scanController.resumeSecondScan()
         try await rebuildTask.value
 
-        #expect(await recorder.waitForCount(2))
+        #expect(await recorder.waitForLastValue(.completed, minimumCount: 2))
         try await Task.sleep(for: .milliseconds(50))
-        #expect(await recorder.count == 2)
         #expect(await recorder.value(at: 0) == .completed)
-        #expect(await recorder.value(at: 1) == .completed)
+        #expect(await recorder.occurrenceCount(of: .completed) == 2)
+        #expect(await recorder.occurrenceCount(of: .failed("synthetic scan failure")) == 0)
 
         await coordinator.stop()
     }
 
     @Test
-    func currentGenerationScanErrorStillPublishesFailed() async throws {
+    func currentGenerationScanErrorPublishesPartial() async throws {
         let directoryURL = try temporaryCoordinatorDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
         let root = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
@@ -414,7 +483,7 @@ struct IngestionCoordinatorTests {
         watcher.emit()
 
         #expect(await recorder.waitForCount(2))
-        #expect(await recorder.value(at: 1) == .failed("synthetic scan failure"))
+        #expect(await recorder.value(at: 1) == .partial(failedFiles: 1))
 
         await coordinator.stop()
     }
@@ -616,6 +685,25 @@ private actor SecondScanErrorController {
     }
 }
 
+private actor FailureIsolationController {
+    private var shouldFailBrokenFile = true
+    private var recordedNames: [String] = []
+
+    var scannedNames: [String] { recordedNames.sorted() }
+
+    func scan(_ url: URL, using scanner: SessionScanner) async throws -> ScanResult {
+        recordedNames.append(url.lastPathComponent)
+        if shouldFailBrokenFile, url.lastPathComponent == "broken.jsonl" {
+            throw SyntheticCoordinatorError(message: "synthetic broken file")
+        }
+        return try await scanner.scan(url: url)
+    }
+
+    func allowBrokenFile() {
+        shouldFailBrokenFile = false
+    }
+}
+
 private actor SuspensionGate {
     private var suspended = false
     private var suspensionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -673,6 +761,30 @@ private actor UpdateRecorder {
             try? await Task.sleep(for: .milliseconds(50))
         }
         return values.count >= expected
+    }
+
+    func waitForValue(_ expected: IngestionUpdate, attempts: Int = 60) async -> Bool {
+        for _ in 0..<attempts {
+            if values.contains(expected) { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return values.contains(expected)
+    }
+
+    func waitForLastValue(
+        _ expected: IngestionUpdate,
+        minimumCount: Int,
+        attempts: Int = 60
+    ) async -> Bool {
+        for _ in 0..<attempts {
+            if values.count >= minimumCount, values.last == expected { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return values.count >= minimumCount && values.last == expected
+    }
+
+    func occurrenceCount(of expected: IngestionUpdate) -> Int {
+        values.count { $0 == expected }
     }
 
     func value(at index: Int) -> IngestionUpdate? {

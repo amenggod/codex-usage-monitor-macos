@@ -187,6 +187,10 @@ struct UsagePopoverView: View {
             "更新于 \(date.formatted(date: .omitted, time: .shortened))"
         case let .stale(date):
             "数据可能已过期 · \(date.formatted(date: .omitted, time: .shortened))"
+        case let .partial(_, failedFiles):
+            "部分数据等待恢复 · \(failedFiles) 个文件"
+        case let .rebuilding(completed, total):
+            "正在重建 · \(completed)/\(total)"
         case .noData:
             "尚无本地用量数据"
         case let .failed(message):
@@ -202,6 +206,10 @@ struct UsagePopoverView: View {
             "checkmark.circle"
         case .stale:
             "exclamationmark.arrow.triangle.2.circlepath"
+        case .partial:
+            "exclamationmark.triangle"
+        case .rebuilding:
+            "arrow.triangle.2.circlepath"
         case .noData:
             "tray"
         case .failed:
