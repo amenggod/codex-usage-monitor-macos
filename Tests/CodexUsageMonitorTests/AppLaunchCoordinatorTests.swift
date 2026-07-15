@@ -258,6 +258,11 @@ private final class AppLaunchAtLoginSpy: @unchecked Sendable, LaunchAtLoginServi
     var hasMigrationError: Bool { migrationError != nil }
     var migrationCount: Int { lock.withLock { recordedMigrationCount } }
 
+    func applyUserPreference(enabled: Bool) throws -> Bool {
+        try migrateLegacyRegistrationIfNeeded()
+        return isEnabled
+    }
+
     func setEnabled(_ enabled: Bool) throws {}
 
     func migrateLegacyRegistrationIfNeeded() throws {

@@ -5,6 +5,8 @@ protocol LaunchAtLoginServicing: AnyObject, Sendable {
     var isEnabled: Bool { get }
     var lastErrorDescription: String? { get }
     var hasMigrationError: Bool { get }
+    @discardableResult
+    func applyUserPreference(enabled: Bool) throws -> Bool
     func setEnabled(_ enabled: Bool) throws
     func migrateLegacyRegistrationIfNeeded() throws
 }
@@ -31,6 +33,14 @@ enum LaunchAtLoginMigrationError: LocalizedError, Sendable {
         case let .rollbackFailed(migration, rollback):
             "登录项迁移失败：\(migration)；回滚新登录项失败：\(rollback)"
         }
+    }
+}
+
+enum LaunchAtLoginPreferenceError: LocalizedError, Sendable {
+    case unknownRegistrationStatus
+
+    var errorDescription: String? {
+        "登录项返回未知状态，无法确认设置是否生效"
     }
 }
 
@@ -65,6 +75,27 @@ final class LaunchAtLoginController: LaunchAtLoginServicing, Sendable {
 
     var hasMigrationError: Bool {
         migrationStore.hasMigrationError
+    }
+
+    @discardableResult
+    func applyUserPreference(enabled: Bool) throws -> Bool {
+        try migrateLegacyRegistrationIfNeeded()
+
+        do {
+            let current = try helperEnabledState()
+            if current != enabled {
+                try setEnabled(enabled)
+            }
+            let final = try helperEnabledState()
+            migrationStore.setLastErrorDescription(nil, isMigrationError: false)
+            return final
+        } catch {
+            migrationStore.setLastErrorDescription(
+                error.localizedDescription,
+                isMigrationError: false
+            )
+            throw error
+        }
     }
 
     func setEnabled(_ enabled: Bool) throws {
@@ -169,6 +200,17 @@ final class LaunchAtLoginController: LaunchAtLoginServicing, Sendable {
                 migration: migrationError.localizedDescription,
                 rollback: error.localizedDescription
             )
+        }
+    }
+
+    private func helperEnabledState() throws -> Bool {
+        switch adapter.registrationStatus {
+        case .enabled:
+            true
+        case .notRegistered, .requiresApproval, .notFound:
+            false
+        case .unknown:
+            throw LaunchAtLoginPreferenceError.unknownRegistrationStatus
         }
     }
 }

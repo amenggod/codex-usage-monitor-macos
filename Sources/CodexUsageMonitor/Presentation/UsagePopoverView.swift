@@ -1,5 +1,30 @@
 import AppKit
+import Observation
 import SwiftUI
+
+@MainActor
+@Observable
+final class LaunchAtLoginPromptState {
+    private let launchAtLogin: any LaunchAtLoginServicing
+    private(set) var errorDescription: String?
+
+    init(launchAtLogin: any LaunchAtLoginServicing) {
+        self.launchAtLogin = launchAtLogin
+        errorDescription = launchAtLogin.lastErrorDescription
+    }
+
+    @discardableResult
+    func enable() -> Bool {
+        do {
+            let enabled = try launchAtLogin.applyUserPreference(enabled: true)
+            errorDescription = launchAtLogin.lastErrorDescription
+            return enabled
+        } catch {
+            errorDescription = launchAtLogin.lastErrorDescription ?? error.localizedDescription
+            return launchAtLogin.isEnabled
+        }
+    }
+}
 
 @MainActor
 struct UsagePopoverView: View {
@@ -8,7 +33,7 @@ struct UsagePopoverView: View {
     private let dashboard: (any DashboardPresenting)?
     @AppStorage("didAskLaunchAtLogin") private var didAskLaunchAtLogin = false
     @State private var showLaunchAtLoginPrompt = false
-    @State private var launchPromptError: String?
+    @State private var launchPromptState: LaunchAtLoginPromptState
 
     init(
         model: UsageViewModel,
@@ -18,6 +43,9 @@ struct UsagePopoverView: View {
         self.model = model
         self.launchAtLogin = launchAtLogin
         self.dashboard = dashboard
+        _launchPromptState = State(initialValue: LaunchAtLoginPromptState(
+            launchAtLogin: launchAtLogin
+        ))
     }
 
     var body: some View {
@@ -150,7 +178,7 @@ struct UsagePopoverView: View {
                     "数据状态，\(FreshnessFormatter.text(for: model.snapshot.freshness))"
                 )
 
-            if let launchPromptError {
+            if let launchPromptError = launchPromptState.errorDescription {
                 Text(launchPromptError)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -210,12 +238,7 @@ struct UsagePopoverView: View {
 
     private func enableLaunchAtLoginFromPrompt() {
         didAskLaunchAtLogin = true
-        do {
-            try launchAtLogin.setEnabled(true)
-            launchPromptError = nil
-        } catch {
-            launchPromptError = error.localizedDescription
-        }
+        launchPromptState.enable()
     }
 }
 

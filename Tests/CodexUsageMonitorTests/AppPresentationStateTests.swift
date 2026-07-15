@@ -182,6 +182,89 @@ struct AppPresentationStateTests {
     }
 
     @MainActor
+    @Test func settingsUsesSinglePreferenceTransactionAndReturnedState() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            preferenceResults: [false]
+        )
+        let state = SettingsViewState(
+            launchAtLogin: service,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false)
+        )
+
+        state.setLaunchAtLoginEnabled(true)
+
+        #expect(service.preferenceRequests == [true])
+        #expect(service.directSetRequests.isEmpty)
+        #expect(!state.isLaunchAtLoginEnabled)
+    }
+
+    @MainActor
+    @Test func settingsPreferenceRetriesStartupMigrationAndClearsItsError() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            migrationFailures: ["无法迁移旧登录项"]
+        )
+        #expect(throws: PresentationTestFailure.self) {
+            try service.migrateLegacyRegistrationIfNeeded()
+        }
+        let state = SettingsViewState(
+            launchAtLogin: service,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false)
+        )
+
+        state.setLaunchAtLoginEnabled(true)
+
+        #expect(service.preferenceRequests == [true])
+        #expect(service.directSetRequests.isEmpty)
+        #expect(service.migrationCount == 2)
+        #expect(state.isLaunchAtLoginEnabled)
+        #expect(state.launchAtLoginError == nil)
+        #expect(!state.canRetryLaunchAtLoginMigration)
+    }
+
+    @MainActor
+    @Test func launchPromptRetriesStartupMigrationThroughPreferenceTransaction() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            migrationFailures: ["首次迁移失败"]
+        )
+        #expect(throws: PresentationTestFailure.self) {
+            try service.migrateLegacyRegistrationIfNeeded()
+        }
+        let prompt = LaunchAtLoginPromptState(launchAtLogin: service)
+
+        let enabled = prompt.enable()
+
+        #expect(enabled)
+        #expect(service.preferenceRequests == [true])
+        #expect(service.directSetRequests.isEmpty)
+        #expect(service.migrationCount == 2)
+        #expect(prompt.errorDescription == nil)
+    }
+
+    @MainActor
+    @Test func launchPromptPreservesMigrationErrorWhenRetryFails() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            migrationFailures: ["首次迁移失败", "再次迁移失败"]
+        )
+        #expect(throws: PresentationTestFailure.self) {
+            try service.migrateLegacyRegistrationIfNeeded()
+        }
+        let prompt = LaunchAtLoginPromptState(launchAtLogin: service)
+
+        let enabled = prompt.enable()
+
+        #expect(!enabled)
+        #expect(service.preferenceRequests == [true])
+        #expect(service.directSetRequests.isEmpty)
+        #expect(service.migrationCount == 2)
+        #expect(prompt.errorDescription == "再次迁移失败")
+        #expect(service.hasMigrationError)
+    }
+
+    @MainActor
     @Test func startupLoginItemMigrationErrorIsVisibleAndCanBeRetried() {
         let service = LaunchAtLoginServiceSpy(
             enabled: false,
@@ -283,15 +366,20 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
     private var storedLastErrorDescription: String?
     private var storedHasMigrationError = false
     private var recordedMigrationCount = 0
+    private var storedPreferenceResults: [Bool]
+    private var recordedPreferenceRequests: [Bool] = []
+    private var recordedDirectSetRequests: [Bool] = []
 
     init(
         enabled: Bool,
         enableFailure: String? = nil,
-        migrationFailures: [String] = []
+        migrationFailures: [String] = [],
+        preferenceResults: [Bool] = []
     ) {
         self.enabled = enabled
         storedEnableFailure = enableFailure
         storedMigrationFailures = migrationFailures
+        storedPreferenceResults = preferenceResults
     }
 
     var isEnabled: Bool {
@@ -315,8 +403,35 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
         lock.withLock { recordedMigrationCount }
     }
 
+    var preferenceRequests: [Bool] {
+        lock.withLock { recordedPreferenceRequests }
+    }
+
+    var directSetRequests: [Bool] {
+        lock.withLock { recordedDirectSetRequests }
+    }
+
+    func applyUserPreference(enabled: Bool) throws -> Bool {
+        lock.withLock { recordedPreferenceRequests.append(enabled) }
+        try migrateLegacyRegistrationIfNeeded()
+        return try lock.withLock {
+            if enabled, let storedEnableFailure {
+                storedLastErrorDescription = storedEnableFailure
+                storedHasMigrationError = false
+                throw PresentationTestFailure(message: storedEnableFailure)
+            }
+            self.enabled = storedPreferenceResults.isEmpty
+                ? enabled
+                : storedPreferenceResults.removeFirst()
+            storedLastErrorDescription = nil
+            storedHasMigrationError = false
+            return self.enabled
+        }
+    }
+
     func setEnabled(_ enabled: Bool) throws {
         try lock.withLock {
+            recordedDirectSetRequests.append(enabled)
             if enabled, let storedEnableFailure {
                 throw PresentationTestFailure(message: storedEnableFailure)
             }

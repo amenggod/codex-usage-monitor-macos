@@ -26,16 +26,13 @@ final class SettingsViewState {
     }
 
     func setLaunchAtLoginEnabled(_ enabled: Bool) {
-        let previousValue = isLaunchAtLoginEnabled
-        launchAtLoginError = nil
-        canRetryLaunchAtLoginMigration = false
         do {
-            try launchAtLogin.migrateLegacyRegistrationIfNeeded()
-            try launchAtLogin.setEnabled(enabled)
-            isLaunchAtLoginEnabled = launchAtLogin.isEnabled
+            isLaunchAtLoginEnabled = try launchAtLogin.applyUserPreference(enabled: enabled)
+            launchAtLoginError = launchAtLogin.lastErrorDescription
+            canRetryLaunchAtLoginMigration = launchAtLogin.hasMigrationError
         } catch {
-            isLaunchAtLoginEnabled = previousValue
-            launchAtLoginError = error.localizedDescription
+            isLaunchAtLoginEnabled = launchAtLogin.isEnabled
+            launchAtLoginError = launchAtLogin.lastErrorDescription ?? error.localizedDescription
             canRetryLaunchAtLoginMigration = launchAtLogin.hasMigrationError
         }
     }

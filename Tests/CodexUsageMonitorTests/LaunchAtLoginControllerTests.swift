@@ -57,6 +57,135 @@ struct LaunchAtLoginControllerTests {
         #expect(helper.registrationStatus == .enabled)
     }
 
+    @Test func applyingEnabledPreferenceAfterEnabledMigrationRegistersHelperOnlyOnce() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(status: .notRegistered)
+        let legacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        let enabled = try controller.applyUserPreference(enabled: true)
+
+        #expect(enabled)
+        #expect(helper.operations == [.register])
+        #expect(legacy.operations == [.unregister])
+        #expect(controller.lastErrorDescription == nil)
+    }
+
+    @Test func applyingDisabledPreferenceAfterDeclinedMigrationDoesNotUnregisterTwice() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(status: .requiresApproval)
+        let legacy = LaunchAtLoginAdapterSpy(status: .requiresApproval)
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        let enabled = try controller.applyUserPreference(enabled: false)
+
+        #expect(!enabled)
+        #expect(helper.operations == [.unregister])
+        #expect(legacy.operations == [.unregister])
+    }
+
+    @Test(arguments: [true, false])
+    func applyingAlreadySatisfiedPreferenceIsIdempotent(enabled: Bool) throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(status: enabled ? .enabled : .notRegistered)
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            defaults: suite.defaults
+        )
+
+        let actual = try controller.applyUserPreference(enabled: enabled)
+
+        #expect(actual == enabled)
+        #expect(helper.operations.isEmpty)
+    }
+
+    @Test func applyingPreferenceStopsAtMigrationFailureAndCanRetry() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let failedHelper = LaunchAtLoginAdapterSpy(status: .notRegistered)
+        let failedLegacy = LaunchAtLoginAdapterSpy(
+            status: .enabled,
+            unregisterError: LaunchAtLoginTestFailure(message: "无法迁移旧登录项")
+        )
+        let failedController = LaunchAtLoginController(
+            adapter: failedHelper,
+            legacyAdapter: failedLegacy,
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginTestFailure.self) {
+            try failedController.applyUserPreference(enabled: true)
+        }
+        #expect(failedHelper.operations == [.register, .unregister])
+        #expect(failedController.hasMigrationError)
+        #expect(failedController.lastErrorDescription == "无法迁移旧登录项")
+
+        let retryHelper = LaunchAtLoginAdapterSpy(status: .notRegistered)
+        let retryLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        let retryController = LaunchAtLoginController(
+            adapter: retryHelper,
+            legacyAdapter: retryLegacy,
+            defaults: suite.defaults
+        )
+
+        let enabled = try retryController.applyUserPreference(enabled: true)
+
+        #expect(enabled)
+        #expect(retryHelper.operations == [.register])
+        #expect(retryLegacy.operations == [.unregister])
+        #expect(!retryController.hasMigrationError)
+        #expect(retryController.lastErrorDescription == nil)
+    }
+
+    @Test func applyingPreferenceReturnsFinalHelperStateWhenSystemDoesNotReachTarget() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(
+            status: .notRegistered,
+            registrationResultStatus: .requiresApproval
+        )
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            defaults: suite.defaults
+        )
+
+        let enabled = try controller.applyUserPreference(enabled: true)
+
+        #expect(!enabled)
+        #expect(helper.operations == [.register])
+        #expect(helper.registrationStatus == .requiresApproval)
+    }
+
+    @Test func applyingPreferenceFailsVisiblyForUnknownHelperStatus() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let controller = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(status: .unknown),
+            legacyAdapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginPreferenceError.self) {
+            try controller.applyUserPreference(enabled: false)
+        }
+
+        #expect(controller.lastErrorDescription == "登录项返回未知状态，无法确认设置是否生效")
+        #expect(!controller.hasMigrationError)
+    }
+
     @Test(arguments: [
         LaunchAtLoginRegistrationStatus.notRegistered,
         LaunchAtLoginRegistrationStatus.notFound,
