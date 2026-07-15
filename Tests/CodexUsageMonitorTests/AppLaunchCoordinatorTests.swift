@@ -12,7 +12,8 @@ struct AppLaunchCoordinatorTests {
         let coordinator = AppLaunchCoordinator(
             arguments: ["CodexUsageMonitor"],
             runtime: runtime,
-            dashboard: dashboard
+            dashboard: dashboard,
+            launchAtLogin: AppLaunchAtLoginSpy()
         )
 
         await coordinator.applicationDidFinishLaunching()
@@ -28,7 +29,8 @@ struct AppLaunchCoordinatorTests {
         let coordinator = AppLaunchCoordinator(
             arguments: ["CodexUsageMonitor", "--background"],
             runtime: runtime,
-            dashboard: dashboard
+            dashboard: dashboard,
+            launchAtLogin: AppLaunchAtLoginSpy()
         )
 
         await coordinator.applicationDidFinishLaunching()
@@ -43,7 +45,8 @@ struct AppLaunchCoordinatorTests {
         let coordinator = AppLaunchCoordinator(
             arguments: [],
             runtime: AppRuntimeLauncherSpy(),
-            dashboard: dashboard
+            dashboard: dashboard,
+            launchAtLogin: AppLaunchAtLoginSpy()
         )
 
         coordinator.handle(urls: [URL(string: "codexusagemonitor://dashboard")!])
@@ -58,7 +61,8 @@ struct AppLaunchCoordinatorTests {
         let coordinator = AppLaunchCoordinator(
             arguments: [],
             runtime: AppRuntimeLauncherSpy(),
-            dashboard: dashboard
+            dashboard: dashboard,
+            launchAtLogin: AppLaunchAtLoginSpy()
         )
         let invalidURLs = [
             "other://dashboard",
@@ -83,6 +87,7 @@ struct AppLaunchCoordinatorTests {
             arguments: ["CodexUsageMonitor"],
             runtime: runtime,
             dashboard: dashboard,
+            launchAtLogin: AppLaunchAtLoginSpy(),
             notificationCenter: center
         )
 
@@ -123,7 +128,8 @@ struct AppLaunchCoordinatorTests {
         let coordinator = AppLaunchCoordinator(
             arguments: [],
             runtime: AppRuntimeLauncherSpy(),
-            dashboard: dashboard
+            dashboard: dashboard,
+            launchAtLogin: AppLaunchAtLoginSpy()
         )
         defer { dashboard.close() }
 
@@ -136,6 +142,42 @@ struct AppLaunchCoordinatorTests {
 
         #expect(dashboard.window === firstWindow)
         #expect(firstWindow.isVisible)
+    }
+
+    @MainActor
+    @Test func applicationLaunchMigratesLegacyRegistration() async {
+        let launchAtLogin = AppLaunchAtLoginSpy()
+        let coordinator = AppLaunchCoordinator(
+            arguments: ["CodexUsageMonitor"],
+            runtime: AppRuntimeLauncherSpy(),
+            dashboard: DashboardPresenterSpy(),
+            launchAtLogin: launchAtLogin
+        )
+
+        await coordinator.applicationDidFinishLaunching()
+
+        #expect(launchAtLogin.migrationCount == 1)
+    }
+
+    @MainActor
+    @Test func migrationFailureDoesNotBlockRuntimeOrDashboard() async {
+        let runtime = AppRuntimeLauncherSpy()
+        let dashboard = DashboardPresenterSpy()
+        let launchAtLogin = AppLaunchAtLoginSpy(
+            migrationError: DashboardTestFailure(message: "无法迁移登录项")
+        )
+        let coordinator = AppLaunchCoordinator(
+            arguments: ["CodexUsageMonitor"],
+            runtime: runtime,
+            dashboard: dashboard,
+            launchAtLogin: launchAtLogin
+        )
+
+        await coordinator.applicationDidFinishLaunching()
+
+        #expect(launchAtLogin.migrationCount == 1)
+        #expect(runtime.startCount == 1)
+        #expect(dashboard.showCount == 1)
     }
 
     @MainActor
@@ -192,6 +234,29 @@ private final class DashboardPresenterSpy: DashboardPresenting {
 
     func showDashboard() {
         showCount += 1
+    }
+}
+
+private final class AppLaunchAtLoginSpy: @unchecked Sendable, LaunchAtLoginServicing {
+    private let lock = NSLock()
+    private let migrationError: (any Error)?
+    private var recordedMigrationCount = 0
+
+    init(migrationError: (any Error)? = nil) {
+        self.migrationError = migrationError
+    }
+
+    var isEnabled: Bool { false }
+    var lastErrorDescription: String? { migrationError?.localizedDescription }
+    var migrationCount: Int { lock.withLock { recordedMigrationCount } }
+
+    func setEnabled(_ enabled: Bool) throws {}
+
+    func migrateLegacyRegistrationIfNeeded() throws {
+        try lock.withLock {
+            recordedMigrationCount += 1
+            if let migrationError { throw migrationError }
+        }
     }
 }
 

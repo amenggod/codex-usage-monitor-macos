@@ -12,6 +12,7 @@ final class AppLaunchCoordinator {
     private let isBackgroundLaunch: Bool
     private let runtime: any AppRuntimeLaunching
     private let dashboard: any DashboardPresenting
+    private let launchAtLogin: any LaunchAtLoginServicing
     private let notificationCenter: NotificationCenter
     private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
 
@@ -19,11 +20,13 @@ final class AppLaunchCoordinator {
         arguments: [String],
         runtime: any AppRuntimeLaunching,
         dashboard: any DashboardPresenting,
+        launchAtLogin: any LaunchAtLoginServicing,
         notificationCenter: NotificationCenter = .default
     ) {
         isBackgroundLaunch = arguments.contains("--background")
         self.runtime = runtime
         self.dashboard = dashboard
+        self.launchAtLogin = launchAtLogin
         self.notificationCenter = notificationCenter
         observers = [
             notificationCenter.addObserver(
@@ -58,6 +61,7 @@ final class AppLaunchCoordinator {
     }
 
     func applicationDidFinishLaunching() async {
+        try? launchAtLogin.migrateLegacyRegistrationIfNeeded()
         await runtime.launch()
         if !isBackgroundLaunch {
             dashboard.showDashboard()

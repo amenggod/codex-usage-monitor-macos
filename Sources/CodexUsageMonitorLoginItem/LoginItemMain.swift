@@ -5,9 +5,11 @@ import Darwin
 @main
 struct LoginItemMain {
     static func main() {
-        let mainURL = LoginItemMainApplicationLocator.mainApplicationURL(
+        guard let mainURL = LoginItemMainApplicationLocator.mainApplicationURL(
             from: Bundle.main.bundleURL
-        )
+        ) else {
+            exit(EXIT_FAILURE)
+        }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.arguments = ["--background"]

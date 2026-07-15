@@ -1,4 +1,5 @@
 import Foundation
+import ServiceManagement
 import Testing
 @testable import CodexUsageMonitor
 @testable import CodexUsageShared
@@ -11,16 +12,38 @@ struct LaunchAtLoginControllerTests {
         )
 
         #expect(
-            LoginItemMainApplicationLocator.mainApplicationURL(from: helper).path
+            LoginItemMainApplicationLocator.mainApplicationURL(from: helper)?.path
                 == "/Applications/Codex Usage Monitor.app"
         )
+    }
+
+    @Test(
+        arguments: [
+            "/Applications/Codex Usage Monitor.app/Contents/Library/LoginItems/CodexUsageMonitorLoginItem",
+            "/Applications/Codex Usage Monitor.app/Contents/Library/Helpers/CodexUsageMonitorLoginItem.app",
+            "/Applications/Codex Usage Monitor.app/Contents/Resources/LoginItems/CodexUsageMonitorLoginItem.app",
+            "/Applications/Codex Usage Monitor.app/Package/Library/LoginItems/CodexUsageMonitorLoginItem.app",
+            "/Applications/Codex Usage Monitor/Contents/Library/LoginItems/CodexUsageMonitorLoginItem.app",
+            "/CodexUsageMonitorLoginItem.app",
+        ]
+    )
+    func loginHelperRejectsInvalidContainingApplicationStructures(path: String) {
+        let helper = URL(fileURLWithPath: path)
+
+        #expect(LoginItemMainApplicationLocator.mainApplicationURL(from: helper) == nil)
+    }
+
+    @Test func loginHelperRejectsNonFileURL() {
+        let helper = URL(string: "https://example.com/CodexUsageMonitorLoginItem.app")!
+
+        #expect(LoginItemMainApplicationLocator.mainApplicationURL(from: helper) == nil)
     }
 
     @Test func controllerUsesHelperServiceAndUnregistersLegacyMainApp() throws {
         let suite = try isolatedDefaults()
         defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
-        let helper = LaunchAtLoginAdapterSpy(enabled: false)
-        let legacy = LaunchAtLoginAdapterSpy(enabled: true)
+        let helper = LaunchAtLoginAdapterSpy(status: .notRegistered)
+        let legacy = LaunchAtLoginAdapterSpy(status: .enabled)
         let controller = LaunchAtLoginController(
             adapter: helper,
             legacyAdapter: legacy,
@@ -34,21 +57,64 @@ struct LaunchAtLoginControllerTests {
         #expect(helper.operations == [.register])
     }
 
+    @Test(arguments: [
+        LaunchAtLoginRegistrationStatus.notRegistered,
+        LaunchAtLoginRegistrationStatus.notFound,
+    ])
+    func missingLegacyRegistrationCompletesMigrationWithoutUnregister(
+        status: LaunchAtLoginRegistrationStatus
+    ) throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let missingLegacy = LaunchAtLoginAdapterSpy(status: status)
+        let controller = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            legacyAdapter: missingLegacy,
+            defaults: suite.defaults
+        )
+
+        try controller.migrateLegacyRegistrationIfNeeded()
+
+        let laterLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        try LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            legacyAdapter: laterLegacy,
+            defaults: suite.defaults
+        ).migrateLegacyRegistrationIfNeeded()
+        #expect(missingLegacy.operations.isEmpty)
+        #expect(laterLegacy.operations.isEmpty)
+    }
+
+    @Test func requiresApprovalLegacyRegistrationIsUnregistered() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let legacy = LaunchAtLoginAdapterSpy(status: .requiresApproval)
+        let controller = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        try controller.migrateLegacyRegistrationIfNeeded()
+
+        #expect(legacy.operations == [.unregister])
+    }
+
     @Test func successfulLegacyMigrationPersistsAndRunsOnlyOnce() throws {
         let suite = try isolatedDefaults()
         defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
-        let firstLegacy = LaunchAtLoginAdapterSpy(enabled: true)
+        let firstLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
         let firstController = LaunchAtLoginController(
-            adapter: LaunchAtLoginAdapterSpy(enabled: false),
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
             legacyAdapter: firstLegacy,
             defaults: suite.defaults
         )
 
         try firstController.migrateLegacyRegistrationIfNeeded()
 
-        let secondLegacy = LaunchAtLoginAdapterSpy(enabled: true)
+        let secondLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
         let secondController = LaunchAtLoginController(
-            adapter: LaunchAtLoginAdapterSpy(enabled: false),
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
             legacyAdapter: secondLegacy,
             defaults: suite.defaults
         )
@@ -61,9 +127,12 @@ struct LaunchAtLoginControllerTests {
     @Test func failedLegacyMigrationDoesNotPersistCompletion() throws {
         let suite = try isolatedDefaults()
         defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
-        let failingLegacy = LaunchAtLoginAdapterSpy(enabled: true, unregisterFails: true)
+        let failingLegacy = LaunchAtLoginAdapterSpy(
+            status: .enabled,
+            unregisterError: LaunchAtLoginTestFailure(message: "无法迁移旧登录项")
+        )
         let failingController = LaunchAtLoginController(
-            adapter: LaunchAtLoginAdapterSpy(enabled: false),
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
             legacyAdapter: failingLegacy,
             defaults: suite.defaults
         )
@@ -72,9 +141,9 @@ struct LaunchAtLoginControllerTests {
             try failingController.migrateLegacyRegistrationIfNeeded()
         }
 
-        let retryLegacy = LaunchAtLoginAdapterSpy(enabled: true)
+        let retryLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
         let retryController = LaunchAtLoginController(
-            adapter: LaunchAtLoginAdapterSpy(enabled: false),
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
             legacyAdapter: retryLegacy,
             defaults: suite.defaults
         )
@@ -82,10 +151,61 @@ struct LaunchAtLoginControllerTests {
 
         #expect(failingLegacy.operations == [.unregister])
         #expect(retryLegacy.operations == [.unregister])
+        #expect(failingController.lastErrorDescription == "无法迁移旧登录项")
+    }
+
+    @Test func jobNotFoundDuringLegacyUnregisterCompletesMigration() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let legacy = LaunchAtLoginAdapterSpy(
+            status: .enabled,
+            unregisterError: NSError(
+                domain: "SMAppServiceErrorDomain",
+                code: Int(kSMErrorJobNotFound)
+            )
+        )
+        let controller = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        try controller.migrateLegacyRegistrationIfNeeded()
+
+        let laterLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        try LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            legacyAdapter: laterLegacy,
+            defaults: suite.defaults
+        ).migrateLegacyRegistrationIfNeeded()
+        #expect(legacy.operations == [.unregister])
+        #expect(laterLegacy.operations.isEmpty)
+    }
+
+    @Test func successfulMigrationRetryClearsVisibleError() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let legacy = LaunchAtLoginAdapterSpy(
+            status: .enabled,
+            unregisterError: LaunchAtLoginTestFailure(message: "无法迁移旧登录项")
+        )
+        let controller = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+        #expect(throws: LaunchAtLoginTestFailure.self) {
+            try controller.migrateLegacyRegistrationIfNeeded()
+        }
+        legacy.registrationStatus = .notRegistered
+
+        try controller.migrateLegacyRegistrationIfNeeded()
+
+        #expect(controller.lastErrorDescription == nil)
     }
 
     @Test func reflectsAdapterStateAndRoutesEnableAndDisable() throws {
-        let adapter = LaunchAtLoginAdapterSpy(enabled: false)
+        let adapter = LaunchAtLoginAdapterSpy(status: .notRegistered)
         let controller = LaunchAtLoginController(adapter: adapter)
 
         #expect(!controller.isEnabled)
@@ -97,7 +217,10 @@ struct LaunchAtLoginControllerTests {
     }
 
     @Test func registerErrorPropagates() {
-        let adapter = LaunchAtLoginAdapterSpy(enabled: false, registerFails: true)
+        let adapter = LaunchAtLoginAdapterSpy(
+            status: .notRegistered,
+            registerError: LaunchAtLoginTestFailure()
+        )
         let controller = LaunchAtLoginController(adapter: adapter)
 
         #expect(throws: LaunchAtLoginTestFailure.self) {
@@ -107,7 +230,10 @@ struct LaunchAtLoginControllerTests {
     }
 
     @Test func unregisterErrorPropagates() {
-        let adapter = LaunchAtLoginAdapterSpy(enabled: true, unregisterFails: true)
+        let adapter = LaunchAtLoginAdapterSpy(
+            status: .enabled,
+            unregisterError: LaunchAtLoginTestFailure()
+        )
         let controller = LaunchAtLoginController(adapter: adapter)
 
         #expect(throws: LaunchAtLoginTestFailure.self) {
@@ -129,19 +255,24 @@ private final class LaunchAtLoginAdapterSpy: @unchecked Sendable, LaunchAtLoginS
     }
 
     private let lock = NSLock()
-    private var enabled: Bool
-    private let registerFails: Bool
-    private let unregisterFails: Bool
+    private var storedStatus: LaunchAtLoginRegistrationStatus
+    private let registerError: (any Error)?
+    private let unregisterError: (any Error)?
     private var recordedOperations: [Operation] = []
 
-    init(enabled: Bool, registerFails: Bool = false, unregisterFails: Bool = false) {
-        self.enabled = enabled
-        self.registerFails = registerFails
-        self.unregisterFails = unregisterFails
+    init(
+        status: LaunchAtLoginRegistrationStatus,
+        registerError: (any Error)? = nil,
+        unregisterError: (any Error)? = nil
+    ) {
+        storedStatus = status
+        self.registerError = registerError
+        self.unregisterError = unregisterError
     }
 
-    var isEnabled: Bool {
-        lock.withLock { enabled }
+    var registrationStatus: LaunchAtLoginRegistrationStatus {
+        get { lock.withLock { storedStatus } }
+        set { lock.withLock { storedStatus = newValue } }
     }
 
     var operations: [Operation] {
@@ -151,18 +282,21 @@ private final class LaunchAtLoginAdapterSpy: @unchecked Sendable, LaunchAtLoginS
     func register() throws {
         try lock.withLock {
             recordedOperations.append(.register)
-            if registerFails { throw LaunchAtLoginTestFailure() }
-            enabled = true
+            if let registerError { throw registerError }
+            storedStatus = .enabled
         }
     }
 
     func unregister() throws {
         try lock.withLock {
             recordedOperations.append(.unregister)
-            if unregisterFails { throw LaunchAtLoginTestFailure() }
-            enabled = false
+            if let unregisterError { throw unregisterError }
+            storedStatus = .notRegistered
         }
     }
 }
 
-private struct LaunchAtLoginTestFailure: Error {}
+private struct LaunchAtLoginTestFailure: LocalizedError {
+    var message = "登录项测试失败"
+    var errorDescription: String? { message }
+}

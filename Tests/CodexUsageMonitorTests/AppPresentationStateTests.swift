@@ -154,6 +154,30 @@ struct AppPresentationStateTests {
     }
 
     @MainActor
+    @Test func startupLoginItemMigrationErrorIsVisibleAndCanBeRetried() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            migrationFailures: ["无法迁移旧登录项"]
+        )
+        let state = SettingsViewState(
+            launchAtLogin: service,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false)
+        )
+        #expect(throws: PresentationTestFailure.self) {
+            try service.migrateLegacyRegistrationIfNeeded()
+        }
+
+        state.refreshLaunchAtLoginState()
+
+        #expect(state.launchAtLoginError == "无法迁移旧登录项")
+
+        state.retryLaunchAtLoginMigration()
+
+        #expect(state.launchAtLoginError == nil)
+        #expect(service.migrationCount == 2)
+    }
+
+    @MainActor
     @Test func liveDependencyFailureBecomesVisibleAfterStart() async {
         let model = LiveDependencies.makeFailureViewModel(
             error: PresentationTestFailure(message: "无法打开用量数据库")
@@ -225,10 +249,18 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
     private let lock = NSLock()
     private var enabled: Bool
     private var storedEnableFailure: String?
+    private var storedMigrationFailures: [String]
+    private var storedLastErrorDescription: String?
+    private var recordedMigrationCount = 0
 
-    init(enabled: Bool, enableFailure: String? = nil) {
+    init(
+        enabled: Bool,
+        enableFailure: String? = nil,
+        migrationFailures: [String] = []
+    ) {
         self.enabled = enabled
         storedEnableFailure = enableFailure
+        storedMigrationFailures = migrationFailures
     }
 
     var isEnabled: Bool {
@@ -240,12 +272,32 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
         set { lock.withLock { storedEnableFailure = newValue } }
     }
 
+    var lastErrorDescription: String? {
+        lock.withLock { storedLastErrorDescription }
+    }
+
+    var migrationCount: Int {
+        lock.withLock { recordedMigrationCount }
+    }
+
     func setEnabled(_ enabled: Bool) throws {
         try lock.withLock {
             if enabled, let storedEnableFailure {
                 throw PresentationTestFailure(message: storedEnableFailure)
             }
             self.enabled = enabled
+        }
+    }
+
+    func migrateLegacyRegistrationIfNeeded() throws {
+        try lock.withLock {
+            recordedMigrationCount += 1
+            if !storedMigrationFailures.isEmpty {
+                let failure = storedMigrationFailures.removeFirst()
+                storedLastErrorDescription = failure
+                throw PresentationTestFailure(message: failure)
+            }
+            storedLastErrorDescription = nil
         }
     }
 }

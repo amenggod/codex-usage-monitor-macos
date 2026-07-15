@@ -20,17 +20,34 @@ final class SettingsViewState {
         self.launchAtLogin = launchAtLogin
         self.notificationSender = notificationSender
         isLaunchAtLoginEnabled = launchAtLogin.isEnabled
+        launchAtLoginError = launchAtLogin.lastErrorDescription
     }
 
     func setLaunchAtLoginEnabled(_ enabled: Bool) {
         let previousValue = isLaunchAtLoginEnabled
         launchAtLoginError = nil
         do {
+            try launchAtLogin.migrateLegacyRegistrationIfNeeded()
             try launchAtLogin.setEnabled(enabled)
             isLaunchAtLoginEnabled = launchAtLogin.isEnabled
         } catch {
             isLaunchAtLoginEnabled = previousValue
             launchAtLoginError = error.localizedDescription
+        }
+    }
+
+    func refreshLaunchAtLoginState() {
+        isLaunchAtLoginEnabled = launchAtLogin.isEnabled
+        launchAtLoginError = launchAtLogin.lastErrorDescription
+    }
+
+    func retryLaunchAtLoginMigration() {
+        launchAtLoginError = nil
+        do {
+            try launchAtLogin.migrateLegacyRegistrationIfNeeded()
+            refreshLaunchAtLoginState()
+        } catch {
+            launchAtLoginError = launchAtLogin.lastErrorDescription ?? error.localizedDescription
         }
     }
 
@@ -109,6 +126,9 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                         .accessibilityLabel("登录启动设置失败，\(error)")
+                    Button("重试登录项迁移") {
+                        state.retryLaunchAtLoginMigration()
+                    }
                 }
             }
 
@@ -134,6 +154,7 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding()
         .task {
+            state.refreshLaunchAtLoginState()
             await state.loadNotificationSettings()
         }
     }
