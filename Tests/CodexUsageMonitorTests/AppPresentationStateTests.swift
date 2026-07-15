@@ -5,6 +5,36 @@ import Testing
 @Suite("AppPresentationStateTests")
 struct AppPresentationStateTests {
     @MainActor
+    @Test func displayModeDefaultsToDesktopAndPersists() throws {
+        let suiteName = "DisplayModeTests-\(UUID().uuidString)"
+        let suite = try #require(UserDefaults(suiteName: suiteName))
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        let first = DisplayModeStore(defaults: suite)
+
+        #expect(first.mode == .desktop)
+        #expect(first.showsDesktopCard)
+        #expect(!first.showsMenuBar)
+
+        first.setMode(.both)
+        let reopened = DisplayModeStore(defaults: suite)
+        #expect(reopened.mode == .both)
+        #expect(reopened.showsDesktopCard)
+        #expect(reopened.showsMenuBar)
+    }
+
+    @MainActor
+    @Test func menuBarModeOnlyShowsMenuBar() throws {
+        let suiteName = "DisplayModeTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = DisplayModeStore(defaults: defaults)
+        store.setMode(.menuBar)
+
+        #expect(!store.showsDesktopCard)
+        #expect(store.showsMenuBar)
+    }
+
+    @MainActor
     @Test func appRuntimeLaunchStartsMonitoringOnceWithoutPopover() async {
         let starter = RuntimeStarterSpy()
         let runtime = AppRuntime(starter: starter)

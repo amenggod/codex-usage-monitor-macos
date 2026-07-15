@@ -76,21 +76,32 @@ final class SettingsViewState {
 struct SettingsView: View {
     let model: UsageViewModel
     @State private var state: SettingsViewState
+    @State private var displayModeStore: DisplayModeStore
 
     init(
         model: UsageViewModel,
         launchAtLogin: any LaunchAtLoginServicing = LaunchAtLoginController(),
-        notificationSender: any NotificationSending = UserNotificationSender()
+        notificationSender: any NotificationSending = UserNotificationSender(),
+        displayModeStore: DisplayModeStore = DisplayModeStore()
     ) {
         self.model = model
         _state = State(initialValue: SettingsViewState(
             launchAtLogin: launchAtLogin,
             notificationSender: notificationSender
         ))
+        _displayModeStore = State(initialValue: displayModeStore)
     }
 
     var body: some View {
         Form {
+            Section("显示") {
+                Picker("显示位置", selection: displayModeBinding) {
+                    Text("桌面").tag(DisplayMode.desktop)
+                    Text("菜单栏").tag(DisplayMode.menuBar)
+                    Text("桌面与菜单栏").tag(DisplayMode.both)
+                }
+            }
+
             Section("启动") {
                 Toggle("登录时启动", isOn: launchAtLoginBinding)
                     .accessibilityHint("控制 Codex Usage Monitor 是否在登录后自动运行")
@@ -132,6 +143,13 @@ struct SettingsView: View {
         Binding(
             get: { state.isLaunchAtLoginEnabled },
             set: { state.setLaunchAtLoginEnabled($0) }
+        )
+    }
+
+    private var displayModeBinding: Binding<DisplayMode> {
+        Binding(
+            get: { displayModeStore.mode },
+            set: { displayModeStore.setMode($0) }
         )
     }
 
