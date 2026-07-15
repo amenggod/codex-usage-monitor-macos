@@ -70,7 +70,10 @@ struct UsagePopoverView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
-                    ForEach(knownWindows, id: \.storageKey) { window in
+                    ForEach(
+                        UsagePresentationPolicy.visibleWindows(limits: model.snapshot.limits),
+                        id: \.storageKey
+                    ) { window in
                         if let status = model.snapshot.limits.first(where: { $0.window == window }) {
                             LimitCard(status: status)
                         } else {
@@ -123,11 +126,17 @@ struct UsagePopoverView: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Label(freshnessText, systemImage: freshnessSymbol)
+            Label(
+                FreshnessFormatter.text(for: model.snapshot.freshness),
+                systemImage: FreshnessFormatter.symbol(for: model.snapshot.freshness)
+            )
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .accessibilityLabel("数据状态，\(freshnessText)")
+                .labelStyle(.titleAndIcon)
+                .lineLimit(2)
+                .accessibilityLabel(
+                    "数据状态，\(FreshnessFormatter.text(for: model.snapshot.freshness))"
+                )
 
             if let launchPromptError {
                 Text(launchPromptError)
@@ -144,6 +153,7 @@ struct UsagePopoverView: View {
             } label: {
                 Label("重试", systemImage: "arrow.clockwise")
             }
+            .labelStyle(.iconOnly)
             .help("重新扫描 Codex 会话")
 
             Button {
@@ -151,19 +161,21 @@ struct UsagePopoverView: View {
             } label: {
                 Label("重建", systemImage: "arrow.triangle.2.circlepath")
             }
+            .labelStyle(.iconOnly)
             .help("清空本地索引并重新构建")
 
             SettingsLink {
                 Label("Settings", systemImage: "gearshape")
             }
+            .labelStyle(.iconOnly)
 
             Button {
                 NSApplication.shared.terminate(nil)
             } label: {
                 Label("Quit", systemImage: "power")
             }
+            .labelStyle(.iconOnly)
         }
-        .labelStyle(.iconOnly)
         .buttonStyle(.borderless)
         .padding(12)
     }
@@ -173,48 +185,6 @@ struct UsagePopoverView: View {
             get: { model.selectedRange },
             set: { range in Task { await model.selectRange(range) } }
         )
-    }
-
-    private var knownWindows: [LimitWindow] {
-        [.fiveHours, .week]
-    }
-
-    private var freshnessText: String {
-        switch model.snapshot.freshness {
-        case .loading:
-            "正在读取本地用量…"
-        case let .fresh(date):
-            "更新于 \(date.formatted(date: .omitted, time: .shortened))"
-        case let .stale(date):
-            "数据可能已过期 · \(date.formatted(date: .omitted, time: .shortened))"
-        case let .partial(_, failedFiles):
-            "部分数据等待恢复 · \(failedFiles) 个文件"
-        case let .rebuilding(completed, total):
-            "正在重建 · \(completed)/\(total)"
-        case .noData:
-            "尚无本地用量数据"
-        case let .failed(message):
-            "读取失败：\(message)"
-        }
-    }
-
-    private var freshnessSymbol: String {
-        switch model.snapshot.freshness {
-        case .loading:
-            "clock"
-        case .fresh:
-            "checkmark.circle"
-        case .stale:
-            "exclamationmark.arrow.triangle.2.circlepath"
-        case .partial:
-            "exclamationmark.triangle"
-        case .rebuilding:
-            "arrow.triangle.2.circlepath"
-        case .noData:
-            "tray"
-        case .failed:
-            "exclamationmark.triangle"
-        }
     }
 
     private func enableLaunchAtLoginFromPrompt() {

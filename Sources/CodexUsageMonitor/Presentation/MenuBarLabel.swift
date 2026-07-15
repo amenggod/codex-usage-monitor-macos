@@ -24,8 +24,10 @@ func limitColor(remaining: Double) -> Color {
     return .accentColor
 }
 
+@MainActor
 struct MenuBarLabel: View {
     let snapshot: DashboardSnapshot
+    let runtime: AppRuntime
 
     var body: some View {
         HStack(spacing: 5) {
@@ -35,6 +37,7 @@ struct MenuBarLabel: View {
         .foregroundStyle(labelStyle)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量，\(MenuBarFormatter.title(limits: snapshot.limits))")
+        .task { await runtime.launch() }
     }
 
     private var labelStyle: AnyShapeStyle {

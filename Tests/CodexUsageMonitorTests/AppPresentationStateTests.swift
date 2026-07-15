@@ -4,6 +4,95 @@ import Testing
 
 @Suite("AppPresentationStateTests")
 struct AppPresentationStateTests {
+    @Test func missingFiveHourWindowLeavesOnlyWeekVisible() {
+        let week = LimitStatus(window: .week, usedPercent: 50, resetsAt: .distantFuture)
+
+        #expect(UsagePresentationPolicy.visibleWindows(limits: [week]) == [.week])
+    }
+
+    @Test func bothKnownWindowsRemainVisibleInDisplayOrder() {
+        let week = LimitStatus(window: .week, usedPercent: 50, resetsAt: .distantFuture)
+        let fiveHours = LimitStatus(
+            window: .fiveHours,
+            usedPercent: 25,
+            resetsAt: .distantFuture
+        )
+
+        #expect(
+            UsagePresentationPolicy.visibleWindows(limits: [week, fiveHours])
+                == [.fiveHours, .week]
+        )
+    }
+
+    @Test func missingWeekWindowKeepsItsWaitingSlot() {
+        let fiveHours = LimitStatus(
+            window: .fiveHours,
+            usedPercent: 25,
+            resetsAt: .distantFuture
+        )
+
+        #expect(
+            UsagePresentationPolicy.visibleWindows(limits: [fiveHours])
+                == [.fiveHours, .week]
+        )
+    }
+
+    @Test func partialFailureHasReadableStatusText() {
+        let text = FreshnessFormatter.text(
+            for: .partial(.distantPast, failedFiles: 2)
+        )
+
+        #expect(text == "部分数据等待恢复 · 2 个文件")
+    }
+
+    @Test func rebuildingAndFailureHaveReadableStatusText() {
+        #expect(FreshnessFormatter.text(for: .rebuilding(completed: 3, total: 8)) == "正在重建 · 3/8")
+        #expect(FreshnessFormatter.text(for: .failed("数据库不可用")) == "读取失败：数据库不可用")
+    }
+
+    @MainActor
+    @Test func coordinatorRoutesAllModesAndSynchronizesMenuBarInsertion() throws {
+        let suiteName = "PresentationCoordinatorTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = DisplayModeStore(defaults: defaults)
+        let desktop = DesktopPresentationControllerSpy()
+        let coordinator = AppPresentationCoordinator(
+            displayModeStore: store,
+            desktopPresentationController: desktop,
+            notificationCenter: NotificationCenter()
+        )
+
+        coordinator.setMode(.desktop)
+        #expect(!coordinator.isMenuBarInserted)
+        coordinator.setMode(.menuBar)
+        #expect(coordinator.isMenuBarInserted)
+        coordinator.setMode(.both)
+        #expect(coordinator.isMenuBarInserted)
+
+        #expect(store.mode == .both)
+        #expect(desktop.appliedModes == [.desktop, .menuBar, .both])
+    }
+
+    @MainActor
+    @Test func coordinatorRoutesReopenNotificationToDesktopPresenter() throws {
+        let suiteName = "PresentationReopenCoordinatorTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let center = NotificationCenter()
+        let desktop = DesktopPresentationControllerSpy()
+        let coordinator = AppPresentationCoordinator(
+            displayModeStore: DisplayModeStore(defaults: defaults),
+            desktopPresentationController: desktop,
+            notificationCenter: center
+        )
+
+        center.post(name: .codexUsageMonitorReopenRequested, object: nil)
+
+        #expect(desktop.reopenCount == 1)
+        _ = coordinator
+    }
+
     @MainActor
     @Test func desktopAndBothModesShowCardWhileMenuBarModeHidesIt() throws {
         let suiteName = "PresentationModeTests-\(UUID().uuidString)"
@@ -68,15 +157,24 @@ struct AppPresentationStateTests {
     }
 
     @MainActor
-    @Test func menuBarModeOnlyShowsMenuBar() throws {
+    @Test(arguments: [
+        (DisplayMode.desktop, true, false),
+        (DisplayMode.menuBar, false, true),
+        (DisplayMode.both, true, true),
+    ])
+    func modesExposeDesktopAndMenuBarVisibility(
+        mode: DisplayMode,
+        showsDesktopCard: Bool,
+        showsMenuBar: Bool
+    ) throws {
         let suiteName = "DisplayModeTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = DisplayModeStore(defaults: defaults)
-        store.setMode(.menuBar)
+        store.setMode(mode)
 
-        #expect(!store.showsDesktopCard)
-        #expect(store.showsMenuBar)
+        #expect(store.showsDesktopCard == showsDesktopCard)
+        #expect(store.showsMenuBar == showsMenuBar)
     }
 
     @MainActor
@@ -85,13 +183,19 @@ struct AppPresentationStateTests {
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = DisplayModeStore(defaults: defaults)
+        let desktop = DesktopPresentationControllerSpy()
+        let coordinator = AppPresentationCoordinator(
+            displayModeStore: store,
+            desktopPresentationController: desktop,
+            notificationCenter: NotificationCenter()
+        )
         let settings = SettingsView(
             model: LiveDependencies.makeFailureViewModel(
                 error: PresentationTestFailure(message: "unused")
             ),
             launchAtLogin: LaunchAtLoginServiceSpy(enabled: false),
             notificationSender: PresentationNotificationSenderSpy(enabled: false),
-            displayModeStore: store
+            presentationCoordinator: coordinator
         )
 
         let binding = settings.displayModeBinding
@@ -100,6 +204,8 @@ struct AppPresentationStateTests {
 
         #expect(store.mode == .both)
         #expect(DisplayModeStore(defaults: defaults).mode == .both)
+        #expect(coordinator.isMenuBarInserted)
+        #expect(desktop.appliedModes == [.both])
     }
 
     @MainActor
@@ -210,6 +316,20 @@ struct AppPresentationStateTests {
         #expect(state.tenPercentNotificationsEnabled)
         #expect(await !sender.isThresholdEnabled(20))
         #expect(await sender.isThresholdEnabled(10))
+    }
+}
+
+@MainActor
+private final class DesktopPresentationControllerSpy: DesktopCardPresentationControlling {
+    private(set) var appliedModes: [DisplayMode] = []
+    private(set) var reopenCount = 0
+
+    func apply(mode: DisplayMode) {
+        appliedModes.append(mode)
+    }
+
+    func handleReopen() {
+        reopenCount += 1
     }
 }
 

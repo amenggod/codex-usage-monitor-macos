@@ -4,6 +4,20 @@ import Testing
 
 @Suite("MenuBarFormattingTests")
 struct MenuBarFormattingTests {
+    @Test func freshnessSymbolsRemainAvailableForEveryState() {
+        let states: [DataFreshness] = [
+            .loading,
+            .fresh(.distantPast),
+            .stale(.distantPast),
+            .partial(.distantPast, failedFiles: 1),
+            .rebuilding(completed: 1, total: 2),
+            .noData,
+            .failed("错误"),
+        ]
+
+        #expect(states.allSatisfy { !FreshnessFormatter.symbol(for: $0).isEmpty })
+    }
+
     @Test func balancedLabelShowsBothKnownWindows() {
         let limits = [
             LimitStatus(window: .fiveHours, usedPercent: 28, resetsAt: .distantFuture),

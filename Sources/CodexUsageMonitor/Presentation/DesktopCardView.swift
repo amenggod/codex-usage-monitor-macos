@@ -24,7 +24,7 @@ struct DesktopCardView: View {
     }
 
     private var compactCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Codex Usage")
@@ -35,26 +35,53 @@ struct DesktopCardView: View {
                 }
                 Spacer()
                 expansionButton
+                SettingsLink {
+                    Image(systemName: "gearshape")
+                }
+                .buttonStyle(.borderless)
+                .help("打开设置")
+                .accessibilityLabel("打开设置")
+                Button {
+                    NSApplication.shared.terminate(nil)
+                } label: {
+                    Image(systemName: "power")
+                }
+                .buttonStyle(.borderless)
+                .help("退出 Codex Usage Monitor")
+                .accessibilityLabel("退出 Codex Usage Monitor")
             }
 
             HStack(spacing: 12) {
-                ForEach([LimitWindow.fiveHours, .week], id: \.storageKey) { window in
+                ForEach(
+                    UsagePresentationPolicy.visibleWindows(limits: model.snapshot.limits),
+                    id: \.storageKey
+                ) { window in
                     compactLimit(window)
                 }
             }
 
-            Spacer(minLength: 0)
-
             HStack {
-                Text("总 Token")
+                Text("今日 Token")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text(model.snapshot.total.total.formatted(.number.notation(.compactName)))
                     .font(.title3.monospacedDigit().weight(.semibold))
             }
+
+            Label(
+                FreshnessFormatter.text(for: model.snapshot.freshness),
+                systemImage: FreshnessFormatter.symbol(for: model.snapshot.freshness)
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .labelStyle(.titleAndIcon)
+            .lineLimit(1)
+            .accessibilityLabel(
+                "数据状态，\(FreshnessFormatter.text(for: model.snapshot.freshness))"
+            )
         }
-        .padding(18)
+        .padding(16)
         .background(.regularMaterial)
     }
 

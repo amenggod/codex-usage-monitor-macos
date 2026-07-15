@@ -76,20 +76,20 @@ final class SettingsViewState {
 struct SettingsView: View {
     let model: UsageViewModel
     @State private var state: SettingsViewState
-    @State private var displayModeStore: DisplayModeStore
+    @State private var presentationCoordinator: AppPresentationCoordinator
 
     init(
         model: UsageViewModel,
         launchAtLogin: any LaunchAtLoginServicing = LaunchAtLoginController(),
         notificationSender: any NotificationSending = UserNotificationSender(),
-        displayModeStore: DisplayModeStore = DisplayModeStore()
+        presentationCoordinator: AppPresentationCoordinator
     ) {
         self.model = model
         _state = State(initialValue: SettingsViewState(
             launchAtLogin: launchAtLogin,
             notificationSender: notificationSender
         ))
-        _displayModeStore = State(initialValue: displayModeStore)
+        _presentationCoordinator = State(initialValue: presentationCoordinator)
     }
 
     var body: some View {
@@ -148,8 +148,8 @@ struct SettingsView: View {
 
     var displayModeBinding: Binding<DisplayMode> {
         Binding(
-            get: { displayModeStore.mode },
-            set: { displayModeStore.setMode($0) }
+            get: { presentationCoordinator.mode },
+            set: { presentationCoordinator.setMode($0) }
         )
     }
 
