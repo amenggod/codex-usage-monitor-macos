@@ -53,6 +53,28 @@ struct AppLaunchCoordinatorTests {
     }
 
     @MainActor
+    @Test func nonExactDashboardURLsAreIgnored() {
+        let dashboard = DashboardPresenterSpy()
+        let coordinator = AppLaunchCoordinator(
+            arguments: [],
+            runtime: AppRuntimeLauncherSpy(),
+            dashboard: dashboard
+        )
+        let invalidURLs = [
+            "other://dashboard",
+            "codexusagemonitor://other",
+            "codexusagemonitor://dashboard/",
+            "codexusagemonitor://dashboard/path",
+            "codexusagemonitor://dashboard?source=widget",
+            "codexusagemonitor://dashboard#widget",
+        ].compactMap(URL.init(string:))
+
+        coordinator.handle(urls: invalidURLs)
+
+        #expect(dashboard.showCount == 0)
+    }
+
+    @MainActor
     @Test func lifecycleNotificationsRouteAfterObserversAreRegistered() async {
         let center = NotificationCenter()
         let runtime = AppRuntimeLauncherSpy()
@@ -90,6 +112,30 @@ struct AppLaunchCoordinatorTests {
         controller.showDashboard()
 
         #expect(controller.window === firstWindow)
+    }
+
+    @MainActor
+    @Test func reopenAfterClosingDashboardShowsTheSameWindowAgain() throws {
+        let model = LiveDependencies.makeFailureViewModel(
+            error: DashboardTestFailure(message: "unused")
+        )
+        let dashboard = DashboardWindowController(model: model)
+        let coordinator = AppLaunchCoordinator(
+            arguments: [],
+            runtime: AppRuntimeLauncherSpy(),
+            dashboard: dashboard
+        )
+        defer { dashboard.close() }
+
+        dashboard.showDashboard()
+        let firstWindow = try #require(dashboard.window)
+        firstWindow.close()
+        #expect(!firstWindow.isVisible)
+
+        coordinator.handleReopen()
+
+        #expect(dashboard.window === firstWindow)
+        #expect(firstWindow.isVisible)
     }
 
     @MainActor

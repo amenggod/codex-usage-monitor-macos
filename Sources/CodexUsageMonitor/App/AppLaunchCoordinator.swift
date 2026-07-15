@@ -69,13 +69,11 @@ final class AppLaunchCoordinator {
     }
 
     func handle(urls: [URL]) {
-        if urls.contains(where: {
-            $0.scheme == "codexusagemonitor" && $0.host == "dashboard"
-        }) {
-            dashboard.showDashboard()
-        } else if !urls.isEmpty {
-            dashboard.showDashboard()
-        }
+        guard urls.contains(where: {
+            $0.absoluteString == "codexusagemonitor://dashboard"
+        }) else { return }
+
+        dashboard.showDashboard()
     }
 
     deinit {
