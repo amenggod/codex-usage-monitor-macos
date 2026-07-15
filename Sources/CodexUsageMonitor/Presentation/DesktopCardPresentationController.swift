@@ -8,19 +8,19 @@ protocol DesktopCardPresenting: AnyObject {
 @MainActor
 final class DesktopCardPresentationController {
     private let surface: any DesktopCardPresenting
-    private let displayModeStore: DisplayModeStore
+    private var currentMode: DisplayMode
 
     init(
         surface: any DesktopCardPresenting,
         displayModeStore: DisplayModeStore
     ) {
         self.surface = surface
-        self.displayModeStore = displayModeStore
+        currentMode = displayModeStore.mode
     }
 
     func apply(mode: DisplayMode) {
-        displayModeStore.setMode(mode)
-        if displayModeStore.showsDesktopCard {
+        currentMode = mode
+        if mode == .desktop || mode == .both {
             surface.show()
         } else {
             surface.hide()
@@ -28,7 +28,7 @@ final class DesktopCardPresentationController {
     }
 
     func handleReopen() {
-        guard displayModeStore.showsDesktopCard else { return }
+        guard currentMode == .desktop || currentMode == .both else { return }
         surface.show()
     }
 }

@@ -27,6 +27,40 @@ struct MenuBarFormattingTests {
         #expect(MenuBarFormatter.title(limits: limits) == "5h 72% · 周 48%")
     }
 
+    @Test func expiredKnownWindowsAreNotFormatted() {
+        let limits = [
+            LimitStatus(window: .fiveHours, usedPercent: 28, resetsAt: .distantPast),
+            LimitStatus(window: .week, usedPercent: 52, resetsAt: .distantPast),
+        ]
+
+        #expect(MenuBarFormatter.title(limits: limits) == "Codex --")
+    }
+
+    @Test func labelDropsLimitsAtTheirExactResetBoundary() {
+        let reset = Date(timeIntervalSince1970: 1_000)
+        let limits = [
+            LimitStatus(window: .fiveHours, usedPercent: 28, resetsAt: reset),
+            LimitStatus(window: .week, usedPercent: 52, resetsAt: reset),
+        ]
+
+        #expect(
+            MenuBarFormatter.title(
+                limits: limits,
+                now: reset.addingTimeInterval(-0.001)
+            ) == "5h 72% · 周 48%"
+        )
+        #expect(MenuBarFormatter.title(limits: limits, now: reset) == "Codex --")
+    }
+
+    @Test func expiredFiveHourDoesNotHideActiveWeek() {
+        let limits = [
+            LimitStatus(window: .fiveHours, usedPercent: 28, resetsAt: .distantPast),
+            LimitStatus(window: .week, usedPercent: 52, resetsAt: .distantFuture),
+        ]
+
+        #expect(MenuBarFormatter.title(limits: limits) == "周 48%")
+    }
+
     @Test func singleWeekWindowShowsItsRemainingPercent() {
         #expect(MenuBarFormatter.title(limits: [
             LimitStatus(window: .week, usedPercent: 52, resetsAt: .distantFuture),

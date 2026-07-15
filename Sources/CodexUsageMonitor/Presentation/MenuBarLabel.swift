@@ -1,9 +1,10 @@
 import SwiftUI
 
 enum MenuBarFormatter {
-    static func title(limits: [LimitStatus]) -> String {
-        let fiveHours = limits.first { $0.window == .fiveHours }
-        let week = limits.first { $0.window == .week }
+    static func title(limits: [LimitStatus], now: Date = .now) -> String {
+        let activeLimits = UsagePresentationPolicy.activeLimits(limits: limits, now: now)
+        let fiveHours = activeLimits.first { $0.window == .fiveHours }
+        let week = activeLimits.first { $0.window == .week }
 
         return switch (fiveHours, week) {
         case let (.some(fiveHours), .some(week)):
@@ -30,21 +31,31 @@ struct MenuBarLabel: View {
     let runtime: AppRuntime
 
     var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "gauge.with.dots.needle.33percent")
-            Text(MenuBarFormatter.title(limits: snapshot.limits))
+        TimelineView(
+            .periodic(from: .now, by: UsagePresentationPolicy.refreshInterval)
+        ) { context in
+            let activeLimits = UsagePresentationPolicy.activeLimits(
+                limits: snapshot.limits,
+                now: context.date
+            )
+            let title = MenuBarFormatter.title(limits: activeLimits, now: context.date)
+
+            HStack(spacing: 5) {
+                Image(systemName: "gauge.with.dots.needle.33percent")
+                Text(title)
+            }
+            .foregroundStyle(labelStyle(limits: activeLimits))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Codex 用量，\(title)")
         }
-        .foregroundStyle(labelStyle)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Codex 用量，\(MenuBarFormatter.title(limits: snapshot.limits))")
         .task { await runtime.launch() }
     }
 
-    private var labelStyle: AnyShapeStyle {
+    private func labelStyle(limits: [LimitStatus]) -> AnyShapeStyle {
         if isStale {
             return AnyShapeStyle(.secondary)
         }
-        let mostSevereRemaining = snapshot.limits.map(\.remainingPercent).min() ?? 100
+        let mostSevereRemaining = limits.map(\.remainingPercent).min() ?? 100
         return AnyShapeStyle(limitColor(remaining: mostSevereRemaining))
     }
 

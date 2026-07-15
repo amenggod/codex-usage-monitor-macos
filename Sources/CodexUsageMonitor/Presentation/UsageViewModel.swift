@@ -23,6 +23,7 @@ actor NoopLimitNotifier: LimitNotifying {
 @Observable
 final class UsageViewModel {
     private(set) var snapshot: DashboardSnapshot = .loading
+    private(set) var todayTotal: TokenUsage = .zero
     private(set) var selectedRange: TokenRange = .today
 
     private let aggregator: any UsageAggregating
@@ -117,8 +118,21 @@ final class UsageViewModel {
                 now: now,
                 calendar: calendar
             )
+            let refreshedTodayTotal: TokenUsage?
+            if range == .today {
+                refreshedTodayTotal = refreshedSnapshot.total
+            } else {
+                refreshedTodayTotal = try? await aggregator.snapshot(
+                    range: .today,
+                    now: now,
+                    calendar: calendar
+                ).total
+            }
             guard generation == refreshGeneration, range == selectedRange else { return }
             snapshot = refreshedSnapshot
+            if let refreshedTodayTotal {
+                todayTotal = refreshedTodayTotal
+            }
             lastSuccessfulAt = now
             await notifier.evaluate(refreshedSnapshot.limits)
         } catch {

@@ -10,6 +10,43 @@ struct AppPresentationStateTests {
         #expect(UsagePresentationPolicy.visibleWindows(limits: [week]) == [.week])
     }
 
+    @Test func expiredFiveHourWindowLeavesOnlyWeekVisible() {
+        let expiredFiveHours = LimitStatus(
+            window: .fiveHours,
+            usedPercent: 25,
+            resetsAt: .distantPast
+        )
+
+        #expect(
+            UsagePresentationPolicy.visibleWindows(limits: [expiredFiveHours])
+                == [.week]
+        )
+    }
+
+    @Test func presentationTimelineRefreshesExpiredLimitsPromptly() {
+        #expect(UsagePresentationPolicy.refreshInterval <= 1)
+    }
+
+    @Test func limitsExpireExactlyAtTheirResetBoundary() {
+        let reset = Date(timeIntervalSince1970: 1_000)
+        let limits = [
+            LimitStatus(window: .fiveHours, usedPercent: 25, resetsAt: reset),
+            LimitStatus(window: .week, usedPercent: 50, resetsAt: reset),
+        ]
+
+        #expect(
+            UsagePresentationPolicy.activeLimits(
+                limits: limits,
+                now: reset.addingTimeInterval(-0.001)
+            ) == limits
+        )
+        #expect(UsagePresentationPolicy.activeLimits(limits: limits, now: reset).isEmpty)
+        #expect(
+            UsagePresentationPolicy.visibleWindows(limits: limits, now: reset)
+                == [.week]
+        )
+    }
+
     @Test func bothKnownWindowsRemainVisibleInDisplayOrder() {
         let week = LimitStatus(window: .week, usedPercent: 50, resetsAt: .distantFuture)
         let fiveHours = LimitStatus(
@@ -109,6 +146,25 @@ struct AppPresentationStateTests {
         controller.apply(mode: .both)
 
         #expect(surface.events == [.show, .hide, .show])
+    }
+
+    @MainActor
+    @Test func desktopControllerApplyDoesNotPersistMode() throws {
+        let suiteName = "PresentationPersistenceTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = DisplayModeStore(defaults: defaults)
+        let surface = DesktopCardSurfaceSpy()
+        let controller = DesktopCardPresentationController(
+            surface: surface,
+            displayModeStore: store
+        )
+
+        controller.apply(mode: .menuBar)
+
+        #expect(surface.events == [.hide])
+        #expect(store.mode == .desktop)
+        #expect(DisplayModeStore(defaults: defaults).mode == .desktop)
     }
 
     @MainActor

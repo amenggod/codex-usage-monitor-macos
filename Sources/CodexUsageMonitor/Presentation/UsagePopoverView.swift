@@ -18,12 +18,16 @@ struct UsagePopoverView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            dashboard
-            Divider()
-            footer
+        TimelineView(
+            .periodic(from: .now, by: UsagePresentationPolicy.refreshInterval)
+        ) { context in
+            VStack(spacing: 0) {
+                header
+                Divider()
+                dashboard(now: context.date)
+                Divider()
+                footer
+            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .confirmationDialog(
@@ -66,15 +70,20 @@ struct UsagePopoverView: View {
         .padding(16)
     }
 
-    private var dashboard: some View {
-        ScrollView {
+    private func dashboard(now: Date) -> some View {
+        let activeLimits = UsagePresentationPolicy.activeLimits(
+            limits: model.snapshot.limits,
+            now: now
+        )
+
+        return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
                     ForEach(
-                        UsagePresentationPolicy.visibleWindows(limits: model.snapshot.limits),
+                        UsagePresentationPolicy.visibleWindows(limits: activeLimits, now: now),
                         id: \.storageKey
                     ) { window in
-                        if let status = model.snapshot.limits.first(where: { $0.window == window }) {
+                        if let status = activeLimits.first(where: { $0.window == window }) {
                             LimitCard(status: status)
                         } else {
                             MissingLimitCard(window: window)

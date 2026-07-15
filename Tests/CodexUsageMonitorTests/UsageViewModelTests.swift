@@ -127,8 +127,11 @@ struct UsageViewModelTests {
         let aggregator = AggregatorSpy([
             .success(makeSnapshot(total: 1)),
             .success(makeSnapshot(range: .sevenDays, total: 2)),
+            .success(makeSnapshot(total: 10)),
             .success(makeSnapshot(range: .sevenDays, total: 3)),
+            .success(makeSnapshot(total: 11)),
             .success(makeSnapshot(range: .sevenDays, total: 4)),
+            .success(makeSnapshot(total: 12)),
         ])
         let coordinator = CoordinatorSpy()
         let notifier = NotifierSpy()
@@ -143,12 +146,12 @@ struct UsageViewModelTests {
         #expect(await notifier.evaluations.count == 1)
 
         await viewModel.selectRange(.sevenDays)
-        #expect(await aggregator.requestedRanges.count == 2)
+        #expect(await aggregator.requestedRanges.count == 3)
         #expect(await notifier.evaluations.count == 2)
 
         await viewModel.retry()
         await settleAsyncWork()
-        #expect(await aggregator.requestedRanges.count == 3)
+        #expect(await aggregator.requestedRanges.count == 5)
         #expect(await notifier.evaluations.count == 3)
 
         await viewModel.rebuildIndex()
@@ -156,9 +159,47 @@ struct UsageViewModelTests {
 
         #expect(viewModel.selectedRange == .sevenDays)
         #expect(viewModel.snapshot.total.total == 4)
-        #expect(await aggregator.requestedRanges == [.today, .sevenDays, .sevenDays, .sevenDays])
+        #expect(viewModel.todayTotal.total == 12)
+        #expect(await aggregator.requestedRanges == [
+            .today,
+            .sevenDays, .today,
+            .sevenDays, .today,
+            .sevenDays, .today,
+        ])
         #expect(await coordinator.rescanCount == 1)
         #expect(await coordinator.rebuildCount == 1)
+    }
+
+    @MainActor
+    @Test func todayTotalRemainsIndependentAcrossLongerRanges() async {
+        let aggregator = AggregatorSpy([
+            .success(makeSnapshot(total: 12)),
+            .success(makeSnapshot(range: .sevenDays, total: 70)),
+            .success(makeSnapshot(total: 13)),
+            .success(makeSnapshot(range: .all, total: 100)),
+            .success(makeSnapshot(total: 14)),
+        ])
+        let viewModel = UsageViewModel(
+            aggregator: aggregator,
+            coordinator: CoordinatorSpy()
+        )
+
+        await viewModel.start()
+        await settleAsyncWork()
+        #expect(viewModel.todayTotal.total == 12)
+
+        await viewModel.selectRange(.sevenDays)
+        #expect(viewModel.snapshot.total.total == 70)
+        #expect(viewModel.todayTotal.total == 13)
+
+        await viewModel.selectRange(.all)
+        #expect(viewModel.snapshot.total.total == 100)
+        #expect(viewModel.todayTotal.total == 14)
+        #expect(await aggregator.requestedRanges == [
+            .today,
+            .sevenDays, .today,
+            .all, .today,
+        ])
     }
 
     @MainActor
@@ -182,7 +223,8 @@ struct UsageViewModelTests {
 
     @MainActor
     @Test func lateTodaySuccessCannotOverwriteNewerSevenDayResultOrNotifyItsLimits() async {
-        let today = makeSnapshot(total: 10, limits: [makeLimit(usedPercent: 10)])
+        let oldToday = makeSnapshot(total: 10, limits: [makeLimit(usedPercent: 10)])
+        let currentToday = makeSnapshot(total: 12, limits: [makeLimit(usedPercent: 12)])
         let sevenDays = makeSnapshot(
             range: .sevenDays,
             total: 70,
@@ -205,17 +247,21 @@ struct UsageViewModelTests {
         #expect(await eventually { await aggregator.hasRequest(for: .sevenDays) })
 
         await aggregator.succeed(range: .sevenDays, with: sevenDays)
+        #expect(await eventually { await aggregator.requestCount(for: .today) == 2 })
+        await aggregator.succeedLatest(range: .today, with: currentToday)
         await rangeSelection.value
-        await aggregator.succeed(range: .today, with: today)
+        await aggregator.succeed(range: .today, with: oldToday)
         await settleAsyncWork()
 
         #expect(viewModel.selectedRange == .sevenDays)
         #expect(viewModel.snapshot == sevenDays)
+        #expect(viewModel.todayTotal == currentToday.total)
         #expect(await notifier.evaluations == [sevenDays.limits])
     }
 
     @MainActor
     @Test func lateTodayFailureCannotMakeNewerSevenDayResultStale() async {
+        let currentToday = makeSnapshot(total: 15)
         let sevenDays = makeSnapshot(
             range: .sevenDays,
             total: 75,
@@ -238,12 +284,15 @@ struct UsageViewModelTests {
         #expect(await eventually { await aggregator.hasRequest(for: .sevenDays) })
 
         await aggregator.succeed(range: .sevenDays, with: sevenDays)
+        #expect(await eventually { await aggregator.requestCount(for: .today) == 2 })
+        await aggregator.succeedLatest(range: .today, with: currentToday)
         await rangeSelection.value
         await aggregator.fail(range: .today, message: "old request failed")
         await settleAsyncWork()
 
         #expect(viewModel.selectedRange == .sevenDays)
         #expect(viewModel.snapshot == sevenDays)
+        #expect(viewModel.todayTotal == currentToday.total)
         #expect(await notifier.evaluations == [sevenDays.limits])
     }
 
@@ -287,8 +336,20 @@ private actor GatedAggregator: UsageAggregating {
         pendingRequests.contains { $0.range == range }
     }
 
+    func requestCount(for range: TokenRange) -> Int {
+        pendingRequests.count { $0.range == range }
+    }
+
     func succeed(range: TokenRange, with snapshot: DashboardSnapshot) {
         guard let index = pendingRequests.firstIndex(where: { $0.range == range }) else {
+            Issue.record("No pending request for \(range)")
+            return
+        }
+        pendingRequests.remove(at: index).continuation.resume(returning: snapshot)
+    }
+
+    func succeedLatest(range: TokenRange, with snapshot: DashboardSnapshot) {
+        guard let index = pendingRequests.lastIndex(where: { $0.range == range }) else {
             Issue.record("No pending request for \(range)")
             return
         }
