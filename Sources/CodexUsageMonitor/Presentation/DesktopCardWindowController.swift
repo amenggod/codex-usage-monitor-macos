@@ -6,22 +6,29 @@ final class DesktopCardWindowController: NSWindowController, DesktopCardPresenti
     private let model: UsageViewModel
     private let runtime: AppRuntime
     private let preferences: DesktopCardPreferences
+    private let notificationCenter: NotificationCenter
+    private let visibleFrameProvider: (CGPoint?, CGSize) -> CGRect
     private var isExpanded: Bool
     private var hostingView: NSHostingView<DesktopCardView>?
+    private nonisolated(unsafe) var screenParametersObserver: NSObjectProtocol?
 
     init(
         model: UsageViewModel,
         runtime: AppRuntime,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        notificationCenter: NotificationCenter = .default,
+        visibleFrameProvider: ((CGPoint?, CGSize) -> CGRect)? = nil
     ) {
         self.model = model
         self.runtime = runtime
+        self.notificationCenter = notificationCenter
+        self.visibleFrameProvider = visibleFrameProvider ?? Self.preferredVisibleFrame
         let preferences = DesktopCardPreferences(defaults: defaults)
         self.preferences = preferences
         isExpanded = preferences.isExpanded
 
         let size = isExpanded ? DesktopCardSize.expanded : DesktopCardSize.compact
-        let visibleFrame = Self.preferredVisibleFrame(for: preferences.savedOrigin, windowSize: size)
+        let visibleFrame = self.visibleFrameProvider(preferences.savedOrigin, size)
         let requestedOrigin = preferences.savedOrigin ?? Self.defaultOrigin(
             windowSize: size,
             visibleFrame: visibleFrame
@@ -48,6 +55,15 @@ final class DesktopCardWindowController: NSWindowController, DesktopCardPresenti
 
         super.init(window: panel)
         panel.delegate = self
+        screenParametersObserver = notificationCenter.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.reclampToVisibleFrame()
+            }
+        }
         updateRootView()
     }
 
@@ -57,6 +73,7 @@ final class DesktopCardWindowController: NSWindowController, DesktopCardPresenti
     }
 
     func show() {
+        reclampToVisibleFrame()
         window?.orderFrontRegardless()
     }
 
@@ -70,7 +87,7 @@ final class DesktopCardWindowController: NSWindowController, DesktopCardPresenti
         preferences.setExpanded(expanded)
 
         let size = expanded ? DesktopCardSize.expanded : DesktopCardSize.compact
-        let visibleFrame = Self.preferredVisibleFrame(for: panel.frame.origin, windowSize: size)
+        let visibleFrame = visibleFrameProvider(panel.frame.origin, size)
         let requestedOrigin = CGPoint(x: panel.frame.minX, y: panel.frame.maxY - size.height)
         let origin = DesktopCardPlacement.visibleOrigin(
             savedOrigin: requestedOrigin,
@@ -102,6 +119,19 @@ final class DesktopCardWindowController: NSWindowController, DesktopCardPresenti
         self.hostingView = hostingView
     }
 
+    private func reclampToVisibleFrame() {
+        guard let panel = window else { return }
+        let size = panel.frame.size
+        let visibleFrame = visibleFrameProvider(panel.frame.origin, size)
+        let origin = DesktopCardPlacement.visibleOrigin(
+            savedOrigin: panel.frame.origin,
+            windowSize: size,
+            visibleFrame: visibleFrame
+        )
+        panel.setFrame(CGRect(origin: origin, size: size), display: true)
+        preferences.saveOrigin(origin)
+    }
+
     private static func preferredVisibleFrame(for origin: CGPoint?, windowSize: CGSize) -> CGRect {
         if let origin,
            let screen = NSScreen.screens.first(where: {
@@ -117,5 +147,11 @@ final class DesktopCardWindowController: NSWindowController, DesktopCardPresenti
             x: visibleFrame.maxX - windowSize.width - 24,
             y: visibleFrame.maxY - windowSize.height - 24
         )
+    }
+
+    deinit {
+        if let screenParametersObserver {
+            notificationCenter.removeObserver(screenParametersObserver)
+        }
     }
 }

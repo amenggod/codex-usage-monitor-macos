@@ -39,7 +39,12 @@ struct LimitAvailabilityPolicyTests {
         )
 
         #expect(LimitAvailabilityPolicy.activeStatuses(from: [active], now: now) == [
-            LimitStatus(window: .week, usedPercent: 50, resetsAt: active.resetsAt),
+            LimitStatus(
+                limitID: "codex",
+                window: .week,
+                usedPercent: 50,
+                resetsAt: active.resetsAt
+            ),
         ])
     }
 }

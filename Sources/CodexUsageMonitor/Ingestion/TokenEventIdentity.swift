@@ -8,7 +8,7 @@ enum TokenEventIdentity {
         append(Int64(sessionData.count), to: &payload)
         payload.append(sessionData)
         append(
-            Int64((event.occurredAt.timeIntervalSince1970 * 1_000).rounded()),
+            Int64(bitPattern: event.occurredAt.timeIntervalSince1970.bitPattern),
             to: &payload
         )
         append(event.lastUsage, to: &payload)

@@ -1,9 +1,57 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import CodexUsageMonitor
 
 @Suite("UsageViewModelTests")
 struct UsageViewModelTests {
+    @MainActor
+    @Test func retryAfterTransientMigrationFailureMigratesScansAndStartsWatching() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appending(path: "UsageViewModelMigrationRetry-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let sessionsRoot = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sessionsRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let logURL = sessionsRoot.appending(path: "retry.jsonl")
+        try Data(
+            """
+            {"timestamp":"2026-07-14T01:00:00Z","type":"session_meta","payload":{"id":"retry","cwd":"/synthetic/retry"}}
+            {"timestamp":"2026-07-14T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1},"total_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1}}}}
+
+            """.utf8
+        ).write(to: logURL)
+        let databaseURL = directoryURL.appending(path: "index.sqlite")
+        let repository = try UsageRepository(url: databaseURL)
+        let migrationLock = try SQLiteMigrationLock(url: databaseURL)
+        let watcher = RetryWatcher()
+        let coordinator = IngestionCoordinator(
+            roots: [sessionsRoot],
+            repository: repository,
+            scanner: SessionScanner(repository: repository),
+            watcher: watcher
+        )
+        let viewModel = UsageViewModel(
+            aggregator: UsageAggregator(repository: repository),
+            coordinator: coordinator
+        )
+
+        await viewModel.start()
+        #expect(await eventually {
+            if case .failed = viewModel.snapshot.freshness { return true }
+            return false
+        })
+        #expect(watcher.eventsCallCount == 0)
+        await viewModel.selectRange(.all)
+
+        migrationLock.release()
+        await viewModel.retry()
+
+        #expect(await eventually { viewModel.snapshot.total.total == 1 })
+        #expect(try await repository.queryUsage(from: nil, to: .distantFuture).map(\.usage.total) == [1])
+        #expect(watcher.eventsCallCount == 1)
+        await coordinator.stop()
+    }
+
     @MainActor
     @Test func startIsIdempotentAndSuccessfulRefreshEvaluatesLimits() async {
         let expected = makeSnapshot(total: 10, limits: [makeLimit(usedPercent: 35)])
@@ -472,6 +520,57 @@ private final class TerminationProbe: @unchecked Sendable {
 
     func markTerminated() {
         lock.withLock { terminated = true }
+    }
+}
+
+private final class RetryWatcher: SessionFileWatching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let pair = AsyncStream<Void>.makeStream()
+    private var eventCalls = 0
+
+    var startupFailure: String? { nil }
+    var eventsCallCount: Int { lock.withLock { eventCalls } }
+
+    func events() -> AsyncStream<Void> {
+        lock.withLock { eventCalls += 1 }
+        return pair.stream
+    }
+
+    func stop() {
+        pair.continuation.finish()
+    }
+}
+
+private final class SQLiteMigrationLock {
+    private var handle: OpaquePointer?
+
+    init(url: URL) throws {
+        let result = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard result == SQLITE_OK, let handle else {
+            throw SpyFailure(message: "could not open migration lock: \(result)")
+        }
+        let lockResult = sqlite3_exec(handle, "BEGIN IMMEDIATE", nil, nil, nil)
+        guard lockResult == SQLITE_OK else {
+            sqlite3_close(handle)
+            self.handle = nil
+            throw SpyFailure(message: "could not acquire migration lock: \(lockResult)")
+        }
+    }
+
+    func release() {
+        guard let handle else { return }
+        sqlite3_exec(handle, "ROLLBACK", nil, nil, nil)
+        sqlite3_close(handle)
+        self.handle = nil
+    }
+
+    deinit {
+        release()
     }
 }
 

@@ -104,6 +104,23 @@ struct UsageRepositoryTests {
     }
 
     @Test
+    func existingVersionTwoAddsBoundaryFingerprintWithoutLosingReceipts() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        try createLegacyVersionTwoCursorDatabase(
+            at: databaseURL,
+            receiptKey: "week|4000|20"
+        )
+        let repository = try UsageRepository(url: databaseURL)
+
+        try await repository.migrate()
+        try await repository.migrate()
+
+        #expect(try columnNames(table: "file_cursors", at: databaseURL).contains("boundary_fingerprint"))
+        #expect(try await repository.notificationWasSent("week|4000|20"))
+    }
+
+    @Test
     func cursorRoundTripsActiveSessionID() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }
@@ -628,6 +645,39 @@ struct UsageRepositoryTests {
             INSERT INTO notification_receipts (receipt_key, sent_at)
             VALUES ('\(receiptKey)', 1000);
             PRAGMA user_version = 1;
+            """,
+            handle: handle
+        )
+    }
+
+    private func createLegacyVersionTwoCursorDatabase(at url: URL, receiptKey: String) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create legacy v2 fixture")
+        }
+        defer { sqlite3_close(handle) }
+        try executeRawSQL(
+            """
+            CREATE TABLE file_cursors (
+              file_key TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              byte_offset INTEGER NOT NULL,
+              modified_at REAL NOT NULL,
+              active_session_id TEXT
+            );
+            CREATE TABLE notification_receipts (
+              receipt_key TEXT PRIMARY KEY,
+              sent_at REAL NOT NULL
+            );
+            INSERT INTO notification_receipts (receipt_key, sent_at)
+            VALUES ('\(receiptKey)', 1000);
+            PRAGMA user_version = 2;
             """,
             handle: handle
         )

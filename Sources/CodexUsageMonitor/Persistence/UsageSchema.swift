@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 enum UsageSchema {
     static let currentVersion: Int64 = 2
@@ -48,7 +49,8 @@ enum UsageSchema {
               path TEXT NOT NULL,
               byte_offset INTEGER NOT NULL,
               modified_at REAL NOT NULL,
-              active_session_id TEXT
+              active_session_id TEXT,
+              boundary_fingerprint TEXT
             )
             """
         )
@@ -85,5 +87,25 @@ enum UsageSchema {
             )
             """
         )
+    }
+
+    static func ensureVersionTwoCompatibility(in database: SQLiteDatabase) throws {
+        var cursorColumns: Set<String> = []
+        try database.query("PRAGMA table_info(file_cursors)") { statement in
+            guard let value = sqlite3_column_text(statement, 1) else { return }
+            cursorColumns.insert(String(cString: value))
+        }
+        guard !cursorColumns.contains("boundary_fingerprint") else { return }
+
+        try database.execute("BEGIN IMMEDIATE")
+        do {
+            try database.execute(
+                "ALTER TABLE file_cursors ADD COLUMN boundary_fingerprint TEXT"
+            )
+            try database.execute("COMMIT")
+        } catch {
+            _ = try? database.execute("ROLLBACK")
+            throw error
+        }
     }
 }

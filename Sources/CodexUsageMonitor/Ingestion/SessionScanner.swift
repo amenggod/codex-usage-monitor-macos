@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct ScanResult: Equatable, Sendable {
@@ -6,6 +7,7 @@ struct ScanResult: Equatable, Sendable {
 }
 
 actor SessionScanner {
+    private static let fingerprintWindowSize = 4_096
     private let repository: UsageRepository
     private let parser = CodexEventParser()
     private let normalizer = ProjectPathNormalizer()
@@ -28,11 +30,21 @@ actor SessionScanner {
         let modifiedAt = values.contentModificationDate ?? .distantPast
         let savedCursor = try await repository.cursor(for: fileKey)
         let savedOffset = savedCursor?.offset ?? 0
-        let wasTruncated = savedOffset > fileSize
-        let startOffset = wasTruncated ? 0 : savedOffset
 
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
+        let boundaryMatches: Bool
+        if let savedCursor, savedOffset > 0, savedOffset <= fileSize,
+           let savedFingerprint = savedCursor.boundaryFingerprint {
+            boundaryMatches = try Self.boundaryFingerprint(
+                in: handle,
+                endingAt: savedOffset
+            ) == savedFingerprint
+        } else {
+            boundaryMatches = savedOffset == 0
+        }
+        let requiresReset = savedOffset > fileSize || !boundaryMatches
+        let startOffset = requiresReset ? 0 : savedOffset
         try handle.seek(toOffset: startOffset)
         guard let available = try handle.readToEnd(),
               let finalNewline = available.lastIndex(of: 0x0A) else {
@@ -40,7 +52,7 @@ actor SessionScanner {
         }
 
         let complete = available[available.startIndex...finalNewline]
-        var activeSessionID = wasTruncated ? nil : savedCursor?.activeSessionID
+        var activeSessionID = requiresReset ? nil : savedCursor?.activeSessionID
         var sessions: [SessionUpsert] = []
         var events: [LogicalTokenEvent] = []
         var limits: [RateLimitObservation] = []
@@ -73,6 +85,10 @@ actor SessionScanner {
         }
 
         let finalOffset = startOffset + UInt64(complete.count)
+        let boundaryFingerprint = try Self.boundaryFingerprint(
+            in: handle,
+            endingAt: finalOffset
+        )
         _ = try await repository.apply(FileIngestionBatch(
             sessions: sessions,
             events: events,
@@ -82,9 +98,20 @@ actor SessionScanner {
                 path: fileURL.path,
                 offset: finalOffset,
                 modifiedAt: modifiedAt,
-                activeSessionID: activeSessionID
+                activeSessionID: activeSessionID,
+                boundaryFingerprint: boundaryFingerprint
             )
         ))
         return ScanResult(processedLines: processedLines, finalOffset: finalOffset)
+    }
+
+    private static func boundaryFingerprint(
+        in handle: FileHandle,
+        endingAt offset: UInt64
+    ) throws -> String {
+        let length = min(UInt64(fingerprintWindowSize), offset)
+        try handle.seek(toOffset: offset - length)
+        let data = try handle.read(upToCount: Int(length)) ?? Data()
+        return Data(SHA256.hash(data: data)).base64EncodedString()
     }
 }

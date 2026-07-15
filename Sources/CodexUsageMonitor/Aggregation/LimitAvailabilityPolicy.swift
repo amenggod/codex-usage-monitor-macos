@@ -9,6 +9,7 @@ enum LimitAvailabilityPolicy {
             .filter { $0.resetsAt > now }
             .map {
                 LimitStatus(
+                    limitID: $0.limitID,
                     window: $0.window,
                     usedPercent: $0.usedPercent,
                     resetsAt: $0.resetsAt

@@ -37,4 +37,32 @@ struct TokenEventIdentityTests {
 
         #expect(TokenEventIdentity.make(sessionID: "s", event: first) != TokenEventIdentity.make(sessionID: "s", event: second))
     }
+
+    @Test
+    func identityPreservesSubMillisecondTimestampDifferences() {
+        let usage = TokenUsage(
+            input: 10,
+            cachedInput: 2,
+            output: 3,
+            reasoningOutput: 1,
+            total: 13
+        )
+        let first = ParsedTokenEvent(
+            occurredAt: Date(timeIntervalSince1970: 1_000.000_1),
+            lastUsage: usage,
+            cumulativeUsage: usage,
+            limits: []
+        )
+        let second = ParsedTokenEvent(
+            occurredAt: Date(timeIntervalSince1970: 1_000.000_2),
+            lastUsage: usage,
+            cumulativeUsage: usage,
+            limits: []
+        )
+
+        #expect(
+            TokenEventIdentity.make(sessionID: "s", event: first)
+                != TokenEventIdentity.make(sessionID: "s", event: second)
+        )
+    }
 }

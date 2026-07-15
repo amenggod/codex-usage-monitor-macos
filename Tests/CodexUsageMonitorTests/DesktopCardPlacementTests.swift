@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import Testing
@@ -49,4 +50,48 @@ struct DesktopCardPlacementTests {
         #expect(reopened.savedOrigin == CGPoint(x: 123.5, y: -45.25))
         #expect(reopened.isExpanded)
     }
+
+    @MainActor
+    @Test func windowShowAndScreenChangesReclampWithInjectedVisibleFrame() throws {
+        let suiteName = "DesktopCardWindowTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let notificationCenter = NotificationCenter()
+        let visibleFrame = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let model = LiveDependencies.makeFailureViewModel(
+            error: DesktopCardTestFailure(message: "unused")
+        )
+        let controller = DesktopCardWindowController(
+            model: model,
+            runtime: AppRuntime(starter: model),
+            defaults: defaults,
+            notificationCenter: notificationCenter,
+            visibleFrameProvider: { _, _ in visibleFrame }
+        )
+        defer { controller.close() }
+        let originalSize = try #require(controller.window).frame.size
+
+        controller.window?.setFrameOrigin(CGPoint(x: 2_000, y: -500))
+        controller.show()
+        #expect(controller.window?.frame == CGRect(
+            origin: CGPoint(x: 460, y: 0),
+            size: originalSize
+        ))
+
+        controller.window?.setFrameOrigin(CGPoint(x: -500, y: 900))
+        notificationCenter.post(
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+        #expect(controller.window?.frame == CGRect(
+            origin: CGPoint(x: 0, y: 380),
+            size: originalSize
+        ))
+        #expect(DesktopCardPreferences(defaults: defaults).savedOrigin == CGPoint(x: 0, y: 380))
+    }
+}
+
+private struct DesktopCardTestFailure: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }

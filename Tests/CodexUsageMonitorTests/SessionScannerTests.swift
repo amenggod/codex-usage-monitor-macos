@@ -89,6 +89,59 @@ struct SessionScannerTests {
     }
 
     @Test
+    func equalLengthSameInodeRewriteRestartsAtZero() async throws {
+        let fixture = try await ScannerFixture()
+        defer { fixture.remove() }
+        let original = fixture.encodedLines([
+            fixture.sessionLine(id: "old-session", project: "old-one"),
+            fixture.tokenLine(second: 1, last: fixture.usage(10)),
+        ])
+        let rewritten = fixture.encodedLines([
+            fixture.sessionLine(id: "new-session", project: "new-two"),
+            fixture.tokenLine(second: 1, last: fixture.usage(20)),
+        ])
+        #expect(original.count == rewritten.count)
+        try original.write(to: fixture.logURL)
+        let originalFileKey = try fixture.fileKey()
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        try fixture.overwriteInPlace(with: rewritten)
+        #expect(try fixture.fileKey() == originalFileKey)
+        let result = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(result.processedLines == 2)
+        #expect(try await fixture.projectTotals() == ["new-two": 20, "old-one": 10])
+    }
+
+    @Test
+    func longerSameInodeRewriteClearsTheStaleActiveSession() async throws {
+        let fixture = try await ScannerFixture()
+        defer { fixture.remove() }
+        let original = fixture.encodedLines([
+            fixture.sessionLine(id: "old-session", project: "old-one"),
+            fixture.tokenLine(second: 1, last: fixture.usage(10)),
+        ])
+        try original.write(to: fixture.logURL)
+        let originalFileKey = try fixture.fileKey()
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        let sameLengthInvalidPrefix = Data(
+            (String(repeating: "x", count: original.count - 1) + "\n").utf8
+        )
+        let orphanToken = Data(
+            (fixture.tokenLine(second: 2, last: fixture.usage(90)) + "\n").utf8
+        )
+        try fixture.overwriteInPlace(with: sameLengthInvalidPrefix + orphanToken)
+        #expect(try fixture.fileKey() == originalFileKey)
+        let result = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(result.finalOffset > UInt64(original.count))
+        #expect(try await fixture.totalUsage() == 10)
+        let cursor = try await fixture.repository.cursor(for: originalFileKey)
+        #expect(cursor?.activeSessionID == nil)
+    }
+
+    @Test
     func oneFileCanSwitchFromParentToChildSession() async throws {
         let fixture = try await ScannerFixture()
         defer { fixture.remove() }
@@ -160,7 +213,26 @@ private final class ScannerFixture: @unchecked Sendable {
     }
 
     func write(_ lines: [String], to url: URL? = nil) throws {
-        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: url ?? logURL)
+        try encodedLines(lines).write(to: url ?? logURL)
+    }
+
+    func encodedLines(_ lines: [String]) -> Data {
+        Data((lines.joined(separator: "\n") + "\n").utf8)
+    }
+
+    func overwriteInPlace(with data: Data) throws {
+        let handle = try FileHandle(forWritingTo: logURL)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: 0)
+        try handle.seek(toOffset: 0)
+        try handle.write(contentsOf: data)
+    }
+
+    func fileKey() throws -> String {
+        let values = try logURL.resourceValues(forKeys: [.fileResourceIdentifierKey])
+        return values.fileResourceIdentifier
+            .map { String(describing: $0) }
+            ?? logURL.standardizedFileURL.path
     }
 
     func append(_ line: String) throws {

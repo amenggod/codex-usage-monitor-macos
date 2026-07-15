@@ -14,19 +14,22 @@ struct FileCursor: Equatable, Sendable {
     let offset: UInt64
     let modifiedAt: Date
     let activeSessionID: String?
+    let boundaryFingerprint: String?
 
     init(
         fileKey: String,
         path: String,
         offset: UInt64,
         modifiedAt: Date,
-        activeSessionID: String? = nil
+        activeSessionID: String? = nil,
+        boundaryFingerprint: String? = nil
     ) {
         self.fileKey = fileKey
         self.path = path
         self.offset = offset
         self.modifiedAt = modifiedAt
         self.activeSessionID = activeSessionID
+        self.boundaryFingerprint = boundaryFingerprint
     }
 }
 
@@ -69,7 +72,10 @@ actor UsageRepository {
 
     func migrate() throws {
         let version = try userVersion()
-        guard version != UsageSchema.currentVersion else { return }
+        if version == UsageSchema.currentVersion {
+            try UsageSchema.ensureVersionTwoCompatibility(in: database)
+            return
+        }
 
         if version == 1 {
             try resetIndex(preserveNotificationReceipts: true)
@@ -297,7 +303,8 @@ actor UsageRepository {
         var cursor: FileCursor?
         try database.query(
             """
-            SELECT file_key, path, byte_offset, modified_at, active_session_id
+            SELECT file_key, path, byte_offset, modified_at, active_session_id,
+                   boundary_fingerprint
             FROM file_cursors
             WHERE file_key = ?
             LIMIT 1
@@ -309,7 +316,8 @@ actor UsageRepository {
                 path: Self.text(from: statement, column: 1),
                 offset: UInt64(bitPattern: sqlite3_column_int64(statement, 2)),
                 modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-                activeSessionID: Self.optionalText(from: statement, column: 4)
+                activeSessionID: Self.optionalText(from: statement, column: 4),
+                boundaryFingerprint: Self.optionalText(from: statement, column: 5)
             )
         }
         return cursor
@@ -322,20 +330,25 @@ actor UsageRepository {
     private func persistCursor(_ cursor: FileCursor) throws {
         try database.execute(
             """
-            INSERT INTO file_cursors (file_key, path, byte_offset, modified_at, active_session_id)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO file_cursors (
+              file_key, path, byte_offset, modified_at, active_session_id,
+              boundary_fingerprint
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_key) DO UPDATE SET
               path = excluded.path,
               byte_offset = excluded.byte_offset,
               modified_at = excluded.modified_at,
-              active_session_id = excluded.active_session_id
+              active_session_id = excluded.active_session_id,
+              boundary_fingerprint = excluded.boundary_fingerprint
             """,
             [
                 .text(cursor.fileKey),
                 .text(cursor.path),
                 .integer(Int64(bitPattern: cursor.offset)),
                 .real(cursor.modifiedAt.timeIntervalSince1970),
-                cursor.activeSessionID.map(SQLiteValue.text) ?? .null
+                cursor.activeSessionID.map(SQLiteValue.text) ?? .null,
+                cursor.boundaryFingerprint.map(SQLiteValue.text) ?? .null
             ]
         )
     }
@@ -449,6 +462,41 @@ actor UsageRepository {
             wasSent = true
         }
         return wasSent
+    }
+
+    func notificationWasSent(
+        _ key: String,
+        claimingLegacyKey legacyKey: String
+    ) throws -> Bool {
+        try database.execute("BEGIN IMMEDIATE")
+        do {
+            let currentWasSent = try notificationWasSent(key)
+            var legacySentAt: Double?
+            try database.query(
+                "SELECT sent_at FROM notification_receipts WHERE receipt_key = ? LIMIT 1",
+                [.text(legacyKey)]
+            ) { statement in
+                legacySentAt = sqlite3_column_double(statement, 0)
+            }
+
+            if let legacySentAt {
+                if !currentWasSent {
+                    try database.execute(
+                        "INSERT OR IGNORE INTO notification_receipts (receipt_key, sent_at) VALUES (?, ?)",
+                        [.text(key), .real(legacySentAt)]
+                    )
+                }
+                try database.execute(
+                    "DELETE FROM notification_receipts WHERE receipt_key = ?",
+                    [.text(legacyKey)]
+                )
+            }
+            try database.execute("COMMIT")
+            return currentWasSent || legacySentAt != nil
+        } catch {
+            _ = try? database.execute("ROLLBACK")
+            throw error
+        }
     }
 
     func markNotificationSent(_ key: String, sentAt: Date) throws {

@@ -72,9 +72,23 @@ struct ParsedTokenEvent: Equatable, Sendable {
 }
 
 struct LimitStatus: Equatable, Sendable {
+    let limitID: String
     let window: LimitWindow
     let usedPercent: Double
     let resetsAt: Date
+
+    init(
+        limitID: String = "codex",
+        window: LimitWindow,
+        usedPercent: Double,
+        resetsAt: Date
+    ) {
+        self.limitID = limitID
+        self.window = window
+        self.usedPercent = usedPercent
+        self.resetsAt = resetsAt
+    }
+
     var remainingPercent: Double { min(100, max(0, 100 - usedPercent)) }
 }
 

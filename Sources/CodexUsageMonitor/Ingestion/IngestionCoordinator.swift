@@ -60,6 +60,7 @@ actor IngestionCoordinator {
     private var missingRootRecoveryTask: Task<Void, Never>?
     private var rebuildRecoveryTask: Task<Void, Never>?
     private var started = false
+    private var starting = false
     private var stopped = false
     private var rebuilding = false
     private var pendingRescanDuringRebuild = false
@@ -125,15 +126,22 @@ actor IngestionCoordinator {
     }
 
     func start() async {
-        guard !started, !stopped else { return }
-        started = true
+        guard !started, !starting, !stopped else { return }
+        starting = true
 
         do {
             try await repository.migrate()
         } catch {
+            starting = false
             updateContinuation.yield(.failed(error.localizedDescription))
             return
         }
+        guard !stopped else {
+            starting = false
+            return
+        }
+        started = true
+        starting = false
 
         do {
             let activeWatcher = try startWatching()
@@ -154,6 +162,10 @@ actor IngestionCoordinator {
     }
 
     func rescanAll() async {
+        guard started else {
+            await start()
+            return
+        }
         await scanAndPublish(forceAll: false)
     }
 

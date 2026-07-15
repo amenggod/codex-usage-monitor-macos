@@ -38,23 +38,48 @@ actor NotificationCoordinator: LimitNotifying {
         self.sender = sender
     }
 
+    static func receiptKey(
+        limitID: String,
+        window: LimitWindow,
+        resetsAt: Date,
+        threshold: Int
+    ) -> String {
+        let encodedLimitID = Data(limitID.utf8).base64EncodedString()
+        return [
+            "v2",
+            encodedLimitID,
+            window.storageKey,
+            String(Int(resetsAt.timeIntervalSince1970)),
+            String(threshold),
+        ].joined(separator: "|")
+    }
+
     func evaluate(_ limits: [LimitStatus]) async {
         guard await sender.isEnabled() else { return }
 
         for limit in limits {
             for threshold in [20, 10] where limit.remainingPercent < Double(threshold) {
                 guard await sender.isThresholdEnabled(threshold) else { continue }
-                let receiptKey = [
+                let legacyReceiptKey = [
                     limit.window.storageKey,
                     String(Int(limit.resetsAt.timeIntervalSince1970)),
                     String(threshold),
                 ].joined(separator: "|")
+                let receiptKey = Self.receiptKey(
+                    limitID: limit.limitID,
+                    window: limit.window,
+                    resetsAt: limit.resetsAt,
+                    threshold: threshold
+                )
                 guard inFlightReceiptKeys.insert(receiptKey).inserted else { continue }
                 defer { inFlightReceiptKeys.remove(receiptKey) }
 
                 let wasSent: Bool
                 do {
-                    wasSent = try await repository.notificationWasSent(receiptKey)
+                    wasSent = try await repository.notificationWasSent(
+                        receiptKey,
+                        claimingLegacyKey: legacyReceiptKey
+                    )
                 } catch {
                     continue
                 }
