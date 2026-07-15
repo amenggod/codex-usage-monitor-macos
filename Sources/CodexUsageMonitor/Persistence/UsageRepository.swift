@@ -8,6 +8,12 @@ struct StoredUsageRow: Equatable, Sendable {
     let usage: TokenUsage
 }
 
+struct WidgetUsageInputs: Sendable {
+    let todayRows: [StoredUsageRow]
+    let allRows: [StoredUsageRow]
+    let limits: [RateLimitObservation]
+}
+
 struct FileCursor: Equatable, Sendable {
     let fileKey: String
     let path: String
@@ -554,6 +560,14 @@ actor UsageRepository {
         }
 
         return rows
+    }
+
+    func widgetUsageInputs(todayFrom: Date, to: Date) throws -> WidgetUsageInputs {
+        WidgetUsageInputs(
+            todayRows: try queryUsage(from: todayFrom, to: to),
+            allRows: try queryUsage(from: nil, to: to),
+            limits: try latestLimits()
+        )
     }
 
     func resetIndex(preserveNotificationReceipts: Bool = true) throws {

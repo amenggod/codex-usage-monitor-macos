@@ -133,6 +133,34 @@ struct UsageViewModelTests {
     }
 
     @MainActor
+    @Test func partialFreshnessIsPublishedToTheWidget() async {
+        let aggregator = AggregatorSpy([
+            .success(makeSnapshot(total: 10)),
+            .success(makeSnapshot(total: 25)),
+        ])
+        let coordinator = CoordinatorSpy()
+        let widgetPublisher = FreshnessRecordingWidgetPublisher()
+        let viewModel = UsageViewModel(
+            aggregator: aggregator,
+            coordinator: coordinator,
+            widgetPublisher: widgetPublisher
+        )
+        await viewModel.start()
+        await settleAsyncWork()
+
+        await coordinator.send(.partial(failedFiles: 2))
+
+        #expect(await eventually {
+            guard let freshness = await widgetPublisher.lastFreshness,
+                  case let .partial(_, failedFiles) = freshness else {
+                return false
+            }
+            return failedFiles == 2
+        })
+        #expect(viewModel.snapshot.total.total == 25)
+    }
+
+    @MainActor
     @Test func rebuildingUpdateRetainsTheLastDashboardAndOnlyChangesFreshness() async {
         let initial = makeSnapshot(total: 18, limits: [makeLimit(usedPercent: 61)])
         let aggregator = AggregatorSpy([.success(initial)])
@@ -363,6 +391,70 @@ struct UsageViewModelTests {
     }
 
     @MainActor
+    @Test func latePartialRefreshCannotMarkANewerRangePartial() async {
+        let initial = makeSnapshot(total: 10)
+        let refreshedPartial = makeSnapshot(total: 20)
+        let currentToday = makeSnapshot(total: 12)
+        let sevenDays = makeSnapshot(range: .sevenDays, total: 70)
+        let aggregator = GatedAggregator()
+        let coordinator = CoordinatorSpy()
+        let viewModel = UsageViewModel(aggregator: aggregator, coordinator: coordinator)
+
+        await viewModel.start()
+        #expect(await eventually { await aggregator.hasRequest(for: .today) })
+        await aggregator.succeed(range: .today, with: initial)
+        #expect(await eventually { viewModel.snapshot == initial })
+
+        await coordinator.send(.partial(failedFiles: 2))
+        #expect(await eventually { await aggregator.hasRequest(for: .today) })
+        let rangeSelection = Task { @MainActor in
+            await viewModel.selectRange(.sevenDays)
+        }
+        #expect(await eventually { await aggregator.hasRequest(for: .sevenDays) })
+        await aggregator.succeed(range: .sevenDays, with: sevenDays)
+        #expect(await eventually { await aggregator.requestCount(for: .today) == 2 })
+        await aggregator.succeedLatest(range: .today, with: currentToday)
+        await rangeSelection.value
+        await aggregator.succeed(range: .today, with: refreshedPartial)
+        await settleAsyncWork()
+
+        #expect(viewModel.snapshot == sevenDays)
+        #expect(viewModel.todayTotal == currentToday.total)
+    }
+
+    @MainActor
+    @Test func lateWidgetStatusCannotOverwriteNewerRefreshStatus() async {
+        let initial = makeSnapshot(total: 10)
+        let currentToday = makeSnapshot(total: 12)
+        let all = makeSnapshot(range: .all, total: 100)
+        let widgetPublisher = GatedWidgetStatusPublisher()
+        let viewModel = UsageViewModel(
+            aggregator: AggregatorSpy([
+                .success(initial),
+                .success(all),
+                .success(currentToday),
+            ]),
+            coordinator: CoordinatorSpy(),
+            widgetPublisher: widgetPublisher
+        )
+
+        await viewModel.start()
+        #expect(await eventually { await widgetPublisher.requestCount == 1 })
+        let rangeSelection = Task { @MainActor in
+            await viewModel.selectRange(.all)
+        }
+        #expect(await eventually { await widgetPublisher.requestCount == 2 })
+
+        await widgetPublisher.succeedLatest(with: .ready(testWidgetStatusDate))
+        await rangeSelection.value
+        await widgetPublisher.succeedFirst(with: .unavailable("old widget status"))
+        await settleAsyncWork()
+
+        #expect(viewModel.snapshot == all)
+        #expect(viewModel.widgetSharingStatus == .ready(testWidgetStatusDate))
+    }
+
+    @MainActor
     @Test func deinitializationCancelsUpdateConsumption() async {
         let probe = TerminationProbe()
         let aggregator = AggregatorSpy([.success(makeSnapshot(total: 1))])
@@ -523,6 +615,56 @@ private actor NotifierSpy: LimitNotifying {
     }
 }
 
+private actor FreshnessRecordingWidgetPublisher: WidgetSnapshotPublishing {
+    private(set) var freshnessValues: [DataFreshness?] = []
+
+    var lastFreshness: DataFreshness? {
+        freshnessValues.last ?? nil
+    }
+
+    func publish(now: Date, calendar: Calendar) async -> WidgetSharingStatus {
+        freshnessValues.append(nil)
+        return .ready(now)
+    }
+
+    func publish(
+        now: Date,
+        calendar: Calendar,
+        freshness: DataFreshness?
+    ) async -> WidgetSharingStatus {
+        freshnessValues.append(freshness)
+        return .ready(now)
+    }
+}
+
+private actor GatedWidgetStatusPublisher: WidgetSnapshotPublishing {
+    private var continuations: [CheckedContinuation<WidgetSharingStatus, Never>] = []
+
+    var requestCount: Int { continuations.count }
+
+    func publish(now: Date, calendar: Calendar) async -> WidgetSharingStatus {
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func succeedFirst(with status: WidgetSharingStatus) {
+        guard !continuations.isEmpty else {
+            Issue.record("No pending widget status request")
+            return
+        }
+        continuations.removeFirst().resume(returning: status)
+    }
+
+    func succeedLatest(with status: WidgetSharingStatus) {
+        guard !continuations.isEmpty else {
+            Issue.record("No pending widget status request")
+            return
+        }
+        continuations.removeLast().resume(returning: status)
+    }
+}
+
 private struct SpyFailure: LocalizedError, Sendable {
     let message: String
     var errorDescription: String? { message }
@@ -607,6 +749,8 @@ private func eventually(
 private func settleAsyncWork() async {
     try? await Task.sleep(for: .milliseconds(50))
 }
+
+private let testWidgetStatusDate = Date(timeIntervalSince1970: 1_784_164_800)
 
 private func makeSnapshot(
     range: TokenRange = .today,

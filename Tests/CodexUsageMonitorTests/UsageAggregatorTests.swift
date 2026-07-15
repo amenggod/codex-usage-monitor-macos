@@ -72,10 +72,61 @@ struct UsageAggregatorTests {
         let today = try await aggregator.snapshot(range: .today, now: now, calendar: calendar)
         let sevenDays = try await aggregator.snapshot(range: .sevenDays, now: now, calendar: calendar)
         let all = try await aggregator.snapshot(range: .all, now: now, calendar: calendar)
+        let widget = try await aggregator.widgetSnapshots(now: now, calendar: calendar)
 
         #expect(today.total.total == 1)
         #expect(sevenDays.total.total == 3)
         #expect(all.total.total == 6)
+        #expect(widget.today == today)
+        #expect(widget.all == all)
+    }
+
+    @Test
+    func repositoryReadsWidgetInputsFromOneActorBoundary() async throws {
+        let databaseURL = temporaryAggregationDatabaseURL()
+        defer { removeAggregationDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "Asia/Shanghai"))
+        let now = Date(timeIntervalSince1970: 1_783_975_200)
+        let dayStart = calendar.startOfDay(for: now)
+        let project = ProjectIdentity(
+            key: "/synthetic/widget",
+            displayName: "widget",
+            fullPath: "/synthetic/widget"
+        )
+        try await insertAggregationEvent(
+            repository: repository,
+            id: "today-widget",
+            sessionID: "widget-session",
+            project: project,
+            occurredAt: dayStart.addingTimeInterval(60),
+            usage: usage(total: 1)
+        )
+        try await repository.insertUsageEvent(
+            id: "old-widget",
+            sessionID: "widget-session",
+            occurredAt: dayStart.addingTimeInterval(-60),
+            usage: usage(total: 2)
+        )
+        let limit = RateLimitObservation(
+            limitID: "codex",
+            window: .week,
+            usedPercent: 28,
+            resetsAt: now.addingTimeInterval(86_400),
+            observedAt: now
+        )
+        try await repository.replaceLatestLimits([limit])
+
+        let inputs = try await repository.widgetUsageInputs(
+            todayFrom: dayStart,
+            to: now
+        )
+
+        #expect(inputs.todayRows.map(\.usage.total) == [1])
+        #expect(inputs.allRows.map(\.usage.total) == [3])
+        #expect(inputs.limits == [limit])
     }
 
     @Test

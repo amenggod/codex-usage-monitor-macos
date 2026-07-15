@@ -1,10 +1,19 @@
 import Foundation
 
+struct WidgetDashboardSnapshots: Sendable {
+    let today: DashboardSnapshot
+    let all: DashboardSnapshot
+}
+
 protocol UsageAggregating: Sendable {
     func snapshot(range: TokenRange, now: Date, calendar: Calendar) async throws -> DashboardSnapshot
 }
 
-struct UsageAggregator: UsageAggregating, Sendable {
+protocol WidgetSnapshotAggregating: Sendable {
+    func widgetSnapshots(now: Date, calendar: Calendar) async throws -> WidgetDashboardSnapshots
+}
+
+struct UsageAggregator: UsageAggregating, WidgetSnapshotAggregating, Sendable {
     struct Bounds: Equatable, Sendable {
         let start: Date?
         let end: Date
@@ -30,6 +39,44 @@ struct UsageAggregator: UsageAggregating, Sendable {
     ) async throws -> DashboardSnapshot {
         let bounds = Self.bounds(for: range, now: now, calendar: calendar)
         let rows = try await repository.queryUsage(from: bounds.start, to: bounds.end)
+        let limits = LimitAvailabilityPolicy.activeStatuses(
+            from: try await repository.latestLimits(),
+            now: now
+        )
+        return Self.makeSnapshot(range: range, rows: rows, limits: limits, now: now)
+    }
+
+    func widgetSnapshots(
+        now: Date,
+        calendar: Calendar
+    ) async throws -> WidgetDashboardSnapshots {
+        let inputs = try await repository.widgetUsageInputs(
+            todayFrom: calendar.startOfDay(for: now),
+            to: now
+        )
+        let limits = LimitAvailabilityPolicy.activeStatuses(from: inputs.limits, now: now)
+        return WidgetDashboardSnapshots(
+            today: Self.makeSnapshot(
+                range: .today,
+                rows: inputs.todayRows,
+                limits: limits,
+                now: now
+            ),
+            all: Self.makeSnapshot(
+                range: .all,
+                rows: inputs.allRows,
+                limits: limits,
+                now: now
+            )
+        )
+    }
+
+    private static func makeSnapshot(
+        range: TokenRange,
+        rows: [StoredUsageRow],
+        limits: [LimitStatus],
+        now: Date
+    ) -> DashboardSnapshot {
         let duplicateNames = Dictionary(grouping: rows, by: \.projectName)
             .filter { $0.value.count > 1 }
             .keys
@@ -69,10 +116,6 @@ struct UsageAggregator: UsageAggregating, Sendable {
                 total: partial.total + project.usage.total
             )
         }
-        let limits = LimitAvailabilityPolicy.activeStatuses(
-            from: try await repository.latestLimits(),
-            now: now
-        )
 
         return DashboardSnapshot(
             range: range,

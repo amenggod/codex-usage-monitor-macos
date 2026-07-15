@@ -7,15 +7,16 @@ import CodexUsageShared
 struct WidgetSnapshotPublisherTests {
     @MainActor
     @Test func publisherWritesTodayAndAllTimeWithoutLeakingFullPaths() async throws {
+        let privatePath = "/Users/alice/secret/monitor"
         let today = makeSnapshot(range: .today, total: 12, projects: [])
         let all = makeSnapshot(
             range: .all,
             total: 100,
             projects: [
                 ProjectUsage(
-                    id: "p",
+                    id: privatePath,
                     displayName: "monitor",
-                    fullPath: "/secret/path",
+                    fullPath: privatePath,
                     usage: usage(80)
                 )
             ]
@@ -32,7 +33,18 @@ struct WidgetSnapshotPublisherTests {
         let written = try #require(store.lastSnapshot)
         #expect(written.todayTokens == 12)
         #expect(written.allTimeTokens == 100)
-        #expect(written.projects == [WidgetProjectUsage(id: "p", name: "monitor", tokens: 80)])
+        #expect(written.projects == [
+            WidgetProjectUsage(
+                id: "605e0c2fcfe89bebbec3fd55af1013c0df275cc6eed77f83fcad13238325ed94",
+                name: "monitor",
+                tokens: 80
+            )
+        ])
+        let json = try #require(String(
+            data: JSONEncoder.widgetSnapshot.encode(written),
+            encoding: .utf8
+        ))
+        #expect(!json.contains(privatePath))
         #expect(reloader.reloadCount == 1)
     }
 
@@ -57,6 +69,172 @@ struct WidgetSnapshotPublisherTests {
         #expect(reloader.reloadCount == 1)
     }
 
+    @Test func visibleValueChangeTriggersASecondReload() async {
+        let reloader = WidgetReloaderSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([
+                makeSnapshot(range: .today, total: 12, projects: []),
+                makeSnapshot(range: .all, total: 100, projects: []),
+                makeSnapshot(range: .today, total: 13, projects: []),
+                makeSnapshot(range: .all, total: 100, projects: []),
+            ]),
+            store: WidgetStoreSpy(),
+            reloader: reloader
+        )
+
+        _ = await publisher.publish(now: testNow, calendar: testCalendar)
+        _ = await publisher.publish(
+            now: testNow.addingTimeInterval(1),
+            calendar: testCalendar
+        )
+
+        #expect(reloader.reloadCount == 2)
+    }
+
+    @Test func publisherMapsActiveLimitsAndHidesExpiredFiveHourLimit() async throws {
+        let activeFiveHour = LimitStatus(
+            limitID: "five",
+            window: .fiveHours,
+            usedPercent: 40,
+            resetsAt: testNow.addingTimeInterval(3_600)
+        )
+        let activeWeek = LimitStatus(
+            limitID: "week",
+            window: .week,
+            usedPercent: 28,
+            resetsAt: testNow.addingTimeInterval(86_400)
+        )
+        let expiredFiveHour = LimitStatus(
+            limitID: "five",
+            window: .fiveHours,
+            usedPercent: 41,
+            resetsAt: testNow.addingTimeInterval(1)
+        )
+        let store = WidgetStoreSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([
+                makeSnapshot(
+                    range: .today,
+                    total: 12,
+                    projects: [],
+                    limits: [activeFiveHour, activeWeek]
+                ),
+                makeSnapshot(range: .all, total: 100, projects: []),
+                makeSnapshot(
+                    range: .today,
+                    total: 12,
+                    projects: [],
+                    limits: [expiredFiveHour, activeWeek]
+                ),
+                makeSnapshot(range: .all, total: 100, projects: []),
+            ]),
+            store: store,
+            reloader: WidgetReloaderSpy()
+        )
+
+        _ = await publisher.publish(now: testNow, calendar: testCalendar)
+        let active = try #require(store.lastSnapshot)
+        #expect(active.fiveHourLimit == WidgetLimitStatus(
+            id: "five",
+            remainingPercent: 60,
+            resetsAt: activeFiveHour.resetsAt
+        ))
+        #expect(active.weekLimit == WidgetLimitStatus(
+            id: "week",
+            remainingPercent: 72,
+            resetsAt: activeWeek.resetsAt
+        ))
+
+        _ = await publisher.publish(
+            now: testNow.addingTimeInterval(1),
+            calendar: testCalendar
+        )
+        #expect(store.lastSnapshot?.fiveHourLimit == nil)
+        #expect(store.lastSnapshot?.weekLimit?.id == "week")
+    }
+
+    @Test func publisherUsesPartialFreshnessOverride() async throws {
+        let store = WidgetStoreSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([
+                makeSnapshot(range: .today, total: 12, projects: []),
+                makeSnapshot(range: .all, total: 100, projects: []),
+            ]),
+            store: store,
+            reloader: WidgetReloaderSpy()
+        )
+
+        _ = await publisher.publish(
+            now: testNow,
+            calendar: testCalendar,
+            freshness: .partial(testNow, failedFiles: 2)
+        )
+
+        #expect(try #require(store.lastSnapshot).state == .partial(
+            lastSuccessfulAt: testNow,
+            failedFiles: 2
+        ))
+    }
+
+    @Test func publisherRequestsTodayAndAllFromOneAtomicBoundary() async {
+        let aggregator = WidgetPublisherAggregatorSpy([
+            makeSnapshot(range: .today, total: 12, projects: []),
+            makeSnapshot(range: .all, total: 100, projects: []),
+        ])
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: aggregator,
+            store: WidgetStoreSpy(),
+            reloader: WidgetReloaderSpy()
+        )
+
+        _ = await publisher.publish(now: testNow, calendar: testCalendar)
+
+        #expect(await aggregator.atomicRequestCount == 1)
+        #expect(await aggregator.requestedRanges.isEmpty)
+    }
+
+    @Test func olderConcurrentPublishCannotOverwriteNewerSnapshot() async throws {
+        let oldNow = testNow
+        let newNow = testNow.addingTimeInterval(1)
+        let aggregator = GatedWidgetPublisherAggregator()
+        let store = WidgetStoreSpy()
+        let reloader = WidgetReloaderSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: aggregator,
+            store: store,
+            reloader: reloader
+        )
+
+        let oldPublish = Task {
+            await publisher.publish(now: oldNow, calendar: testCalendar)
+        }
+        #expect(await publisherEventually { await aggregator.hasRequest(now: oldNow) })
+        let newPublish = Task {
+            await publisher.publish(now: newNow, calendar: testCalendar)
+        }
+        #expect(await publisherEventually { await aggregator.hasRequest(now: newNow) })
+
+        await aggregator.succeed(
+            now: newNow,
+            today: makeSnapshot(range: .today, total: 20, projects: []),
+            all: makeSnapshot(range: .all, total: 200, projects: [])
+        )
+        _ = await newPublish.value
+        await aggregator.succeed(
+            now: oldNow,
+            today: makeSnapshot(range: .today, total: 10, projects: []),
+            all: makeSnapshot(range: .all, total: 100, projects: [])
+        )
+        _ = await oldPublish.value
+
+        let written = try #require(store.lastSnapshot)
+        #expect(store.snapshots.count == 1)
+        #expect(written.generatedAt == newNow)
+        #expect(written.todayTokens == 20)
+        #expect(written.allTimeTokens == 200)
+        #expect(reloader.reloadCount == 1)
+    }
+
     @Test func storeFailureReturnsUnavailableWithoutBreakingUsageRefresh() async {
         let publisher = WidgetSnapshotPublisher(
             aggregator: WidgetPublisherAggregatorSpy([
@@ -74,8 +252,10 @@ struct WidgetSnapshotPublisherTests {
     }
 }
 
-private actor WidgetPublisherAggregatorSpy: UsageAggregating {
+private actor WidgetPublisherAggregatorSpy: UsageAggregating, WidgetSnapshotAggregating {
     private var snapshots: [DashboardSnapshot]
+    private(set) var requestedRanges: [TokenRange] = []
+    private(set) var atomicRequestCount = 0
 
     init(_ snapshots: [DashboardSnapshot]) {
         self.snapshots = snapshots
@@ -86,8 +266,61 @@ private actor WidgetPublisherAggregatorSpy: UsageAggregating {
         now: Date,
         calendar: Calendar
     ) async throws -> DashboardSnapshot {
+        requestedRanges.append(range)
         guard !snapshots.isEmpty else { throw WidgetStoreTestFailure() }
         return snapshots.removeFirst()
+    }
+
+    func widgetSnapshots(
+        now: Date,
+        calendar: Calendar
+    ) async throws -> WidgetDashboardSnapshots {
+        atomicRequestCount += 1
+        guard snapshots.count >= 2 else { throw WidgetStoreTestFailure() }
+        return WidgetDashboardSnapshots(
+            today: snapshots.removeFirst(),
+            all: snapshots.removeFirst()
+        )
+    }
+}
+
+private actor GatedWidgetPublisherAggregator: UsageAggregating, WidgetSnapshotAggregating {
+    private struct PendingRequest {
+        let now: Date
+        let continuation: CheckedContinuation<WidgetDashboardSnapshots, any Error>
+    }
+
+    private var pendingRequests: [PendingRequest] = []
+
+    func snapshot(
+        range: TokenRange,
+        now: Date,
+        calendar: Calendar
+    ) async throws -> DashboardSnapshot {
+        throw WidgetStoreTestFailure()
+    }
+
+    func widgetSnapshots(
+        now: Date,
+        calendar: Calendar
+    ) async throws -> WidgetDashboardSnapshots {
+        try await withCheckedThrowingContinuation { continuation in
+            pendingRequests.append(PendingRequest(now: now, continuation: continuation))
+        }
+    }
+
+    func hasRequest(now: Date) -> Bool {
+        pendingRequests.contains { $0.now == now }
+    }
+
+    func succeed(now: Date, today: DashboardSnapshot, all: DashboardSnapshot) {
+        guard let index = pendingRequests.firstIndex(where: { $0.now == now }) else {
+            Issue.record("No pending widget request for \(now)")
+            return
+        }
+        pendingRequests.remove(at: index).continuation.resume(
+            returning: WidgetDashboardSnapshots(today: today, all: all)
+        )
     }
 }
 
@@ -133,7 +366,9 @@ private let testCalendar: Calendar = {
 private func makeSnapshot(
     range: TokenRange,
     total: Int64,
-    projects: [ProjectUsage]
+    projects: [ProjectUsage],
+    limits: [LimitStatus]? = nil,
+    freshness: DataFreshness = .fresh(testNow)
 ) -> DashboardSnapshot {
     DashboardSnapshot(
         range: range,
@@ -145,14 +380,14 @@ private func makeSnapshot(
             total: total
         ),
         projects: projects,
-        limits: [
+        limits: limits ?? [
             LimitStatus(
                 window: .week,
                 usedPercent: 28,
                 resetsAt: testNow.addingTimeInterval(86_400)
             )
         ],
-        freshness: .fresh(testNow)
+        freshness: freshness
     )
 }
 
@@ -164,4 +399,15 @@ private func usage(_ total: Int64) -> TokenUsage {
         reasoningOutput: 0,
         total: total
     )
+}
+
+private func publisherEventually(
+    attempts: Int = 100,
+    _ condition: @escaping () async -> Bool
+) async -> Bool {
+    for _ in 0..<attempts {
+        if await condition() { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return false
 }

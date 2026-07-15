@@ -84,8 +84,7 @@ final class UsageViewModel {
         case .completed:
             await refresh()
         case let .partial(failedFiles):
-            await refresh()
-            applyPartial(failedFiles: failedFiles)
+            await refresh(partialFailedFiles: failedFiles)
         case let .rebuilding(completed, total):
             refreshGeneration &+= 1
             snapshot = DashboardSnapshot(
@@ -100,18 +99,11 @@ final class UsageViewModel {
         }
     }
 
-    private func applyPartial(failedFiles: Int) {
-        guard let lastSuccessfulAt else { return }
-        snapshot = DashboardSnapshot(
-            range: selectedRange,
-            total: snapshot.total,
-            projects: snapshot.projects,
-            limits: snapshot.limits,
-            freshness: .partial(lastSuccessfulAt, failedFiles: failedFiles)
-        )
-    }
-
-    private func refresh(now: Date = .now, calendar: Calendar = .current) async {
+    private func refresh(
+        now: Date = .now,
+        calendar: Calendar = .current,
+        partialFailedFiles: Int? = nil
+    ) async {
         let range = selectedRange
         refreshGeneration &+= 1
         let generation = refreshGeneration
@@ -132,15 +124,34 @@ final class UsageViewModel {
                     calendar: calendar
                 ).total
             }
+            let displayedSnapshot: DashboardSnapshot
+            if let partialFailedFiles {
+                displayedSnapshot = DashboardSnapshot(
+                    range: refreshedSnapshot.range,
+                    total: refreshedSnapshot.total,
+                    projects: refreshedSnapshot.projects,
+                    limits: refreshedSnapshot.limits,
+                    freshness: .partial(now, failedFiles: partialFailedFiles)
+                )
+            } else {
+                displayedSnapshot = refreshedSnapshot
+            }
             guard generation == refreshGeneration, range == selectedRange else { return }
-            snapshot = refreshedSnapshot
+            snapshot = displayedSnapshot
             if let refreshedTodayTotal {
                 todayTotal = refreshedTodayTotal
             }
             lastSuccessfulAt = now
-            await notifier.evaluate(refreshedSnapshot.limits)
+            await notifier.evaluate(displayedSnapshot.limits)
+            guard generation == refreshGeneration, range == selectedRange else { return }
             if let widgetPublisher {
-                widgetSharingStatus = await widgetPublisher.publish(now: now, calendar: calendar)
+                let status = await widgetPublisher.publish(
+                    now: now,
+                    calendar: calendar,
+                    freshness: displayedSnapshot.freshness
+                )
+                guard generation == refreshGeneration, range == selectedRange else { return }
+                widgetSharingStatus = status
             }
         } catch {
             guard generation == refreshGeneration, range == selectedRange else { return }
