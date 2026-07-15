@@ -1,0 +1,131 @@
+name: CodexUsageMonitor
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "2"
+packages:
+  SwiftTesting:
+    url: https://github.com/swiftlang/swift-testing.git
+    revision: swift-6.3.2-RELEASE
+targets:
+  CodexUsageShared:
+    type: framework
+    platform: macOS
+    sources: [Sources/CodexUsageShared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Shared
+  CodexUsageMonitor:
+    type: application
+    platform: macOS
+    sources: [Sources/CodexUsageMonitor]
+    info:
+      path: Config/App-Info.plist
+      properties:
+        CFBundleDevelopmentRegion: zh_CN
+        CFBundleDisplayName: Codex Usage Monitor
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: Codex Usage Monitor
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSUIElement: true
+        NSHighResolutionCapable: true
+        CFBundleURLTypes:
+          - CFBundleURLName: Codex Usage Monitor Dashboard
+            CFBundleURLSchemes: [codexusagemonitor]
+    entitlements:
+      path: Config/CodexUsageMonitor.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.amenggod.CodexUsageMonitor
+    settings:
+      base:
+        PRODUCT_NAME: Codex Usage Monitor
+        EXECUTABLE_NAME: CodexUsageMonitor
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor
+    dependencies:
+      - target: CodexUsageShared
+      - target: CodexUsageMonitorWidget
+        embed: true
+      - target: CodexUsageMonitorLoginItem
+        embed: false
+        link: false
+    postBuildScripts:
+      - name: Embed Login Item
+        script: |
+          set -euo pipefail
+          destination="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LoginItems"
+          mkdir -p "$destination"
+          ditto "$BUILT_PRODUCTS_DIR/CodexUsageMonitorLoginItem.app" "$destination/CodexUsageMonitorLoginItem.app"
+  CodexUsageMonitorWidget:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/CodexUsageMonitorWidget
+        optional: true
+    info:
+      path: Config/Widget-Info.plist
+      properties:
+        CFBundleDisplayName: Codex Usage Widget
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundlePackageType: XPC!
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Config/CodexUsageMonitorWidget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.amenggod.CodexUsageMonitor
+    dependencies:
+      - target: CodexUsageShared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Widget
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+  CodexUsageMonitorLoginItem:
+    type: application
+    platform: macOS
+    sources: [Sources/CodexUsageMonitorLoginItem]
+    info:
+      path: Config/LoginItem-Info.plist
+      properties:
+        CFBundleDisplayName: Codex Usage Monitor Login Item
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.LoginItem
+        SKIP_INSTALL: YES
+  CodexUsageMonitorTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/CodexUsageMonitorTests
+        excludes: [Fixtures]
+      - path: Tests/CodexUsageSharedTests
+    resources: [Tests/CodexUsageMonitorTests/Fixtures]
+    dependencies:
+      - target: CodexUsageMonitor
+      - target: CodexUsageShared
+      - package: SwiftTesting
+        product: Testing
