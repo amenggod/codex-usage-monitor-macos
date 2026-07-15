@@ -86,7 +86,7 @@ actor UsageRepository {
             try database.execute("PRAGMA user_version = \(UsageSchema.currentVersion)")
             try database.execute("COMMIT")
         } catch {
-            try? database.execute("ROLLBACK")
+            _ = try? database.execute("ROLLBACK")
             throw error
         }
     }
@@ -162,6 +162,76 @@ actor UsageRepository {
         )
     }
 
+    func apply(_ batch: FileIngestionBatch) throws -> FileIngestionResult {
+        try database.execute("BEGIN IMMEDIATE")
+        do {
+            for session in batch.sessions {
+                try upsertSession(session.metadata, project: session.project)
+            }
+
+            var insertedEvents = 0
+            var cumulativeSessions: Set<String> = []
+            for event in batch.events {
+                let delta = event.lastUsage ?? .zero
+                let inserted = try database.execute(
+                    """
+                    INSERT OR IGNORE INTO usage_events (
+                      id, session_id, occurred_at,
+                      last_input_tokens, last_cached_input_tokens, last_output_tokens,
+                      last_reasoning_output_tokens, last_total_tokens,
+                      cumulative_input_tokens, cumulative_cached_input_tokens,
+                      cumulative_output_tokens, cumulative_reasoning_output_tokens,
+                      cumulative_total_tokens,
+                      delta_input_tokens, delta_cached_input_tokens, delta_output_tokens,
+                      delta_reasoning_output_tokens, delta_total_tokens
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        .text(event.id),
+                        .text(event.sessionID),
+                        .real(event.occurredAt.timeIntervalSince1970),
+                        event.lastUsage.map { .integer($0.input) } ?? .null,
+                        event.lastUsage.map { .integer($0.cachedInput) } ?? .null,
+                        event.lastUsage.map { .integer($0.output) } ?? .null,
+                        event.lastUsage.map { .integer($0.reasoningOutput) } ?? .null,
+                        event.lastUsage.map { .integer($0.total) } ?? .null,
+                        event.cumulativeUsage.map { .integer($0.input) } ?? .null,
+                        event.cumulativeUsage.map { .integer($0.cachedInput) } ?? .null,
+                        event.cumulativeUsage.map { .integer($0.output) } ?? .null,
+                        event.cumulativeUsage.map { .integer($0.reasoningOutput) } ?? .null,
+                        event.cumulativeUsage.map { .integer($0.total) } ?? .null,
+                        .integer(delta.input),
+                        .integer(delta.cachedInput),
+                        .integer(delta.output),
+                        .integer(delta.reasoningOutput),
+                        .integer(delta.total)
+                    ]
+                ) == 1
+
+                guard inserted else { continue }
+                insertedEvents += 1
+                if event.lastUsage == nil, event.cumulativeUsage != nil {
+                    cumulativeSessions.insert(event.sessionID)
+                }
+            }
+
+            for sessionID in cumulativeSessions {
+                try recomputeCumulativeDeltas(sessionID: sessionID)
+            }
+            try upsertLatestLimits(batch.limits)
+            try persistCursor(batch.cursor)
+            try database.execute("COMMIT")
+
+            return FileIngestionResult(
+                insertedEvents: insertedEvents,
+                duplicateEvents: batch.events.count - insertedEvents
+            )
+        } catch {
+            _ = try? database.execute("ROLLBACK")
+            throw error
+        }
+    }
+
     func previousCumulativeUsage(sessionID: String) throws -> TokenUsage? {
         var usage: TokenUsage?
         try database.query(
@@ -207,40 +277,10 @@ actor UsageRepository {
     func replaceLatestLimits(_ observations: [RateLimitObservation]) throws {
         try database.execute("BEGIN IMMEDIATE")
         do {
-            for observation in observations {
-                let label: String? = switch observation.window {
-                case let .other(_, label): label
-                case .fiveHours, .week: nil
-                }
-                try database.execute(
-                    """
-                    INSERT INTO rate_limits (
-                      window_key, limit_id, window_minutes, window_label,
-                      used_percent, resets_at, observed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(window_key) DO UPDATE SET
-                      limit_id = excluded.limit_id,
-                      window_minutes = excluded.window_minutes,
-                      window_label = excluded.window_label,
-                      used_percent = excluded.used_percent,
-                      resets_at = excluded.resets_at,
-                      observed_at = excluded.observed_at
-                    WHERE excluded.observed_at >= rate_limits.observed_at
-                    """,
-                    [
-                        .text(observation.window.storageKey),
-                        .text(observation.limitID),
-                        .integer(Int64(observation.window.minutes)),
-                        label.map(SQLiteValue.text) ?? .null,
-                        .real(observation.usedPercent),
-                        .real(observation.resetsAt.timeIntervalSince1970),
-                        .real(observation.observedAt.timeIntervalSince1970)
-                    ]
-                )
-            }
+            try upsertLatestLimits(observations)
             try database.execute("COMMIT")
         } catch {
-            try? database.execute("ROLLBACK")
+            _ = try? database.execute("ROLLBACK")
             throw error
         }
     }
@@ -301,6 +341,11 @@ actor UsageRepository {
 
     func saveCursor(_ cursor: FileCursor) throws {
         let activeSessionID = cursor.activeSessionID ?? legacySessionIDsByFileKey[cursor.fileKey]
+        try persistCursor(cursor, activeSessionID: activeSessionID)
+    }
+
+    private func persistCursor(_ cursor: FileCursor, activeSessionID: String? = nil) throws {
+        let activeSessionID = activeSessionID ?? cursor.activeSessionID
         try database.execute(
             """
             INSERT INTO file_cursors (file_key, path, byte_offset, modified_at, active_session_id)
@@ -319,6 +364,106 @@ actor UsageRepository {
                 activeSessionID.map(SQLiteValue.text) ?? .null
             ]
         )
+    }
+
+    private func upsertLatestLimits(_ observations: [RateLimitObservation]) throws {
+        for observation in observations {
+            let label: String? = switch observation.window {
+            case let .other(_, label): label
+            case .fiveHours, .week: nil
+            }
+            try database.execute(
+                """
+                INSERT INTO rate_limits (
+                  window_key, limit_id, window_minutes, window_label,
+                  used_percent, resets_at, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(window_key) DO UPDATE SET
+                  limit_id = excluded.limit_id,
+                  window_minutes = excluded.window_minutes,
+                  window_label = excluded.window_label,
+                  used_percent = excluded.used_percent,
+                  resets_at = excluded.resets_at,
+                  observed_at = excluded.observed_at
+                WHERE excluded.observed_at >= rate_limits.observed_at
+                """,
+                [
+                    .text(observation.window.storageKey),
+                    .text(observation.limitID),
+                    .integer(Int64(observation.window.minutes)),
+                    label.map(SQLiteValue.text) ?? .null,
+                    .real(observation.usedPercent),
+                    .real(observation.resetsAt.timeIntervalSince1970),
+                    .real(observation.observedAt.timeIntervalSince1970)
+                ]
+            )
+        }
+    }
+
+    private func recomputeCumulativeDeltas(sessionID: String) throws {
+        struct EventUsage {
+            let id: String
+            let last: TokenUsage?
+            let cumulative: TokenUsage?
+        }
+
+        var events: [EventUsage] = []
+        try database.query(
+            """
+            SELECT id,
+                   last_input_tokens, last_cached_input_tokens, last_output_tokens,
+                   last_reasoning_output_tokens, last_total_tokens,
+                   cumulative_input_tokens, cumulative_cached_input_tokens,
+                   cumulative_output_tokens, cumulative_reasoning_output_tokens,
+                   cumulative_total_tokens
+            FROM usage_events
+            WHERE session_id = ?
+            ORDER BY occurred_at, id
+            """,
+            [.text(sessionID)]
+        ) { statement in
+            events.append(EventUsage(
+                id: Self.text(from: statement, column: 0),
+                last: Self.optionalTokenUsage(from: statement, startingAt: 1),
+                cumulative: Self.optionalTokenUsage(from: statement, startingAt: 6)
+            ))
+        }
+
+        var previousCumulative = TokenUsage.zero
+        for event in events {
+            let delta: TokenUsage?
+            if let last = event.last {
+                delta = last
+            } else if let cumulative = event.cumulative {
+                delta = cumulative - previousCumulative
+            } else {
+                delta = nil
+            }
+
+            if let cumulative = event.cumulative {
+                previousCumulative = cumulative
+            }
+            guard let delta else { continue }
+            try database.execute(
+                """
+                UPDATE usage_events SET
+                  delta_input_tokens = ?,
+                  delta_cached_input_tokens = ?,
+                  delta_output_tokens = ?,
+                  delta_reasoning_output_tokens = ?,
+                  delta_total_tokens = ?
+                WHERE id = ?
+                """,
+                [
+                    .integer(delta.input),
+                    .integer(delta.cachedInput),
+                    .integer(delta.output),
+                    .integer(delta.reasoningOutput),
+                    .integer(delta.total),
+                    .text(event.id)
+                ]
+            )
+        }
     }
 
     func notificationWasSent(_ key: String) throws -> Bool {
@@ -394,7 +539,7 @@ actor UsageRepository {
             try database.execute("PRAGMA user_version = 0")
             try database.execute("COMMIT")
         } catch {
-            try? database.execute("ROLLBACK")
+            _ = try? database.execute("ROLLBACK")
             throw error
         }
     }
@@ -433,6 +578,14 @@ actor UsageRepository {
             reasoningOutput: sqlite3_column_int64(statement, column + 3),
             total: sqlite3_column_int64(statement, column + 4)
         )
+    }
+
+    private static func optionalTokenUsage(
+        from statement: OpaquePointer,
+        startingAt column: Int32
+    ) -> TokenUsage? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL else { return nil }
+        return tokenUsage(from: statement, startingAt: column)
     }
 
     private static func text(from statement: OpaquePointer, column: Int32) -> String {

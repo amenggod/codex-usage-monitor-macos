@@ -6,6 +6,31 @@ import Testing
 @Suite
 struct UsageRepositoryTests {
     @Test
+    func duplicateLogicalEventsAcrossFileBatchesAreCountedOnce() async throws {
+        let fixture = try await RepositoryBatchFixture()
+        defer { fixture.remove() }
+        let event = fixture.event(sessionID: "parent", second: 1, lastTotal: 25, cumulativeTotal: 25)
+
+        _ = try await fixture.repository.apply(fixture.batch(fileKey: "file-a", events: [event]))
+        _ = try await fixture.repository.apply(fixture.batch(fileKey: "file-b", events: [event]))
+
+        #expect(try await fixture.total() == 25)
+    }
+
+    @Test
+    func cumulativeOnlyEventsRecomputeWhenOlderEventArrivesLater() async throws {
+        let fixture = try await RepositoryBatchFixture()
+        defer { fixture.remove() }
+        let later = fixture.cumulativeOnlyEvent(sessionID: "s", second: 2, cumulativeTotal: 30)
+        let earlier = fixture.cumulativeOnlyEvent(sessionID: "s", second: 1, cumulativeTotal: 10)
+
+        _ = try await fixture.repository.apply(fixture.batch(fileKey: "later", events: [later]))
+        _ = try await fixture.repository.apply(fixture.batch(fileKey: "earlier", events: [earlier]))
+
+        #expect(try await fixture.total() == 30)
+    }
+
+    @Test
     func v1MigrationCreatesMultiSessionSchemaAndPreservesReceipts() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }
@@ -739,5 +764,112 @@ struct UsageRepositoryTests {
             throw SQLiteError(code: sqlite3_errcode(handle), message: "raw query returned no row")
         }
         return Int(sqlite3_column_int64(statement, 0))
+    }
+}
+
+private struct RepositoryBatchFixture: Sendable {
+    let databaseURL: URL
+    let repository: UsageRepository
+    private let project = ProjectIdentity(
+        key: "/synthetic/project",
+        displayName: "project",
+        fullPath: "/synthetic/project"
+    )
+
+    init() async throws {
+        databaseURL = FileManager.default.temporaryDirectory
+            .appending(path: "RepositoryBatchFixture-\(UUID().uuidString)")
+            .appendingPathExtension("sqlite")
+        repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+    }
+
+    func event(
+        sessionID: String,
+        second: TimeInterval,
+        lastTotal: Int64,
+        cumulativeTotal: Int64
+    ) -> LogicalTokenEvent {
+        logicalEvent(
+            sessionID: sessionID,
+            second: second,
+            lastUsage: usage(total: lastTotal),
+            cumulativeUsage: usage(total: cumulativeTotal)
+        )
+    }
+
+    func cumulativeOnlyEvent(
+        sessionID: String,
+        second: TimeInterval,
+        cumulativeTotal: Int64
+    ) -> LogicalTokenEvent {
+        logicalEvent(
+            sessionID: sessionID,
+            second: second,
+            lastUsage: nil,
+            cumulativeUsage: usage(total: cumulativeTotal)
+        )
+    }
+
+    func batch(fileKey: String, events: [LogicalTokenEvent]) -> FileIngestionBatch {
+        let sessionIDs = Set(events.map(\.sessionID))
+        return FileIngestionBatch(
+            sessions: sessionIDs.sorted().map { sessionID in
+                SessionUpsert(
+                    metadata: SessionMetadata(
+                        sessionID: sessionID,
+                        startedAt: Date(timeIntervalSince1970: 0),
+                        workingDirectory: project.fullPath
+                    ),
+                    project: project
+                )
+            },
+            events: events,
+            limits: [],
+            cursor: FileCursor(
+                fileKey: fileKey,
+                path: "/synthetic/\(fileKey).jsonl",
+                offset: 100,
+                modifiedAt: Date(timeIntervalSince1970: 100),
+                activeSessionID: events.last?.sessionID
+            )
+        )
+    }
+
+    func total() async throws -> Int64 {
+        try await repository.queryUsage(from: nil, to: .distantFuture)
+            .map(\.usage.total)
+            .reduce(0, +)
+    }
+
+    func remove() {
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: databaseURL.path + suffix)
+        }
+    }
+
+    private func logicalEvent(
+        sessionID: String,
+        second: TimeInterval,
+        lastUsage: TokenUsage?,
+        cumulativeUsage: TokenUsage?
+    ) -> LogicalTokenEvent {
+        let parsed = ParsedTokenEvent(
+            occurredAt: Date(timeIntervalSince1970: second),
+            lastUsage: lastUsage,
+            cumulativeUsage: cumulativeUsage,
+            limits: []
+        )
+        return LogicalTokenEvent(
+            id: TokenEventIdentity.make(sessionID: sessionID, event: parsed),
+            sessionID: sessionID,
+            occurredAt: parsed.occurredAt,
+            lastUsage: parsed.lastUsage,
+            cumulativeUsage: parsed.cumulativeUsage
+        )
+    }
+
+    private func usage(total: Int64) -> TokenUsage {
+        TokenUsage(input: total, cachedInput: 0, output: 0, reasoningOutput: 0, total: total)
     }
 }
