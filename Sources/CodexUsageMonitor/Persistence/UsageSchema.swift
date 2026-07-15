@@ -3,6 +3,8 @@ import SQLite3
 
 enum UsageSchema {
     static let currentVersion: Int64 = 2
+    static let currentEventIdentityVersion: Int64 = 2
+    private static let eventIdentityVersionKey = "event_identity_version"
 
     static func createVersionTwo(in database: SQLiteDatabase) throws {
         try database.execute(
@@ -87,6 +89,44 @@ enum UsageSchema {
             )
             """
         )
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS index_metadata (
+              key TEXT PRIMARY KEY,
+              value INTEGER NOT NULL
+            )
+            """
+        )
+        try database.execute(
+            """
+            INSERT INTO index_metadata (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            [
+                .text(eventIdentityVersionKey),
+                .integer(currentEventIdentityVersion)
+            ]
+        )
+    }
+
+    static func eventIdentityVersion(in database: SQLiteDatabase) throws -> Int64? {
+        var hasMetadataTable = false
+        try database.query(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'index_metadata' LIMIT 1"
+        ) { _ in
+            hasMetadataTable = true
+        }
+        guard hasMetadataTable else { return nil }
+
+        var version: Int64?
+        try database.query(
+            "SELECT value FROM index_metadata WHERE key = ? LIMIT 1",
+            [.text(eventIdentityVersionKey)]
+        ) { statement in
+            version = sqlite3_column_int64(statement, 0)
+        }
+        return version
     }
 
     static func ensureVersionTwoCompatibility(in database: SQLiteDatabase) throws {

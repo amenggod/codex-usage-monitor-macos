@@ -73,11 +73,20 @@ actor UsageRepository {
     func migrate() throws {
         let version = try userVersion()
         if version == UsageSchema.currentVersion {
-            try UsageSchema.ensureVersionTwoCompatibility(in: database)
-            return
-        }
-
-        if version == 1 {
+            let identityVersion = try UsageSchema.eventIdentityVersion(in: database)
+            if let identityVersion,
+               identityVersion > UsageSchema.currentEventIdentityVersion {
+                throw SQLiteError(
+                    code: SQLITE_SCHEMA,
+                    message: "event identity format \(identityVersion) is newer than supported"
+                )
+            }
+            if identityVersion == UsageSchema.currentEventIdentityVersion {
+                try UsageSchema.ensureVersionTwoCompatibility(in: database)
+                return
+            }
+            try resetIndex(preserveNotificationReceipts: true)
+        } else if version == 1 {
             try resetIndex(preserveNotificationReceipts: true)
         } else if version != 0 {
             try resetIndex(preserveNotificationReceipts: false)
@@ -553,6 +562,7 @@ actor UsageRepository {
             if !preserveNotificationReceipts {
                 try database.execute("DROP TABLE IF EXISTS notification_receipts")
             }
+            try database.execute("DROP TABLE IF EXISTS index_metadata")
             try database.execute("DROP TABLE IF EXISTS rate_limits")
             try database.execute("DROP TABLE IF EXISTS cumulative_usage")
             try database.execute("DROP TABLE IF EXISTS file_cursors")

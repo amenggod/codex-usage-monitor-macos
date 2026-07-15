@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SQLite3
 import Testing
@@ -5,6 +6,51 @@ import Testing
 
 @Suite(.serialized)
 struct EndToEndIngestionTests {
+    @Test
+    func oldVersionTwoMillisecondIndexRebuildsOnceAndPreservesReceipt() async throws {
+        let fixture = try IdentityUpgradeFixture(kind: .oldMillisecondIndex)
+        defer { fixture.remove() }
+
+        try await fixture.repository.migrate()
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(try await fixture.totalUsage() == 10)
+        #expect(try fixture.eventCount() == 1)
+        #expect(try fixture.indexFormatVersion() == 2)
+        #expect(try await fixture.repository.notificationWasSent(fixture.receiptKey))
+
+        try await fixture.repository.migrate()
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(try await fixture.totalUsage() == 10)
+        #expect(try fixture.eventCount() == 1)
+        #expect(try fixture.indexFormatVersion() == 2)
+        #expect(try await fixture.repository.notificationWasSent(fixture.receiptKey))
+    }
+
+    @Test
+    func fingerprintPatchedVersionTwoWithoutMarkerDropsDuplicateIdentitiesAndRebuildsOnce() async throws {
+        let fixture = try IdentityUpgradeFixture(kind: .fingerprintPatchedDuplicates)
+        defer { fixture.remove() }
+        #expect(try fixture.eventCount() == 2)
+
+        try await fixture.repository.migrate()
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(try await fixture.totalUsage() == 10)
+        #expect(try fixture.eventCount() == 1)
+        #expect(try fixture.indexFormatVersion() == 2)
+        #expect(try await fixture.repository.notificationWasSent(fixture.receiptKey))
+
+        try await fixture.repository.migrate()
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(try await fixture.totalUsage() == 10)
+        #expect(try fixture.eventCount() == 1)
+        #expect(try fixture.indexFormatVersion() == 2)
+        #expect(try await fixture.repository.notificationWasSent(fixture.receiptKey))
+    }
+
     @Test
     func liveAndArchivedSessionsProduceRangeProjectLimitAndRebuildSnapshots() async throws {
         let fixture = try EndToEndFixture()
@@ -273,6 +319,324 @@ struct EndToEndIngestionTests {
 
         #expect(try await fixture.snapshot().total.total == 30)
         await fixture.coordinator.stop()
+    }
+}
+
+private final class IdentityUpgradeFixture {
+    enum Kind {
+        case oldMillisecondIndex
+        case fingerprintPatchedDuplicates
+    }
+
+    let directoryURL: URL
+    let logURL: URL
+    let databaseURL: URL
+    let receiptKey = "identity-upgrade-receipt"
+    let repository: UsageRepository
+    let scanner: SessionScanner
+
+    init(kind: Kind) throws {
+        directoryURL = FileManager.default.temporaryDirectory
+            .appending(path: "IdentityUpgradeTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let sessionsRoot = directoryURL.appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sessionsRoot, withIntermediateDirectories: true)
+        logURL = sessionsRoot.appending(path: "identity-upgrade.jsonl")
+        databaseURL = directoryURL.appending(path: "index.sqlite")
+
+        let usage = TokenUsage(
+            input: 10,
+            cachedInput: 0,
+            output: 0,
+            reasoningOutput: 0,
+            total: 10
+        )
+        let timestamp = "2026-07-15T03:00:01.123456Z"
+        let log =
+            """
+            {"timestamp":"2026-07-15T03:00:00Z","type":"session_meta","payload":{"id":"identity-upgrade","cwd":"/synthetic/projects/identity-upgrade"}}
+            {"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":10},"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":10}},"rate_limits":{"limit_id":"codex","primary":{"used_percent":28,"window_minutes":300,"resets_at":1784096400}}}}
+            """ + "\n"
+        let logData = Data(log.utf8)
+        try logData.write(to: logURL)
+        let occurredAt = try Self.date(timestamp)
+        let event = ParsedTokenEvent(
+            occurredAt: occurredAt,
+            lastUsage: usage,
+            cumulativeUsage: usage,
+            limits: []
+        )
+        let legacyID = Self.legacyIdentity(sessionID: "identity-upgrade", event: event)
+        let currentID = TokenEventIdentity.make(sessionID: "identity-upgrade", event: event)
+        let fileKey = try Self.fileKey(for: logURL)
+        let boundaryFingerprint = Data(SHA256.hash(data: logData)).base64EncodedString()
+        try Self.createVersionTwoDatabase(
+            at: databaseURL,
+            kind: kind,
+            logURL: logURL,
+            fileKey: fileKey,
+            fileSize: logData.count,
+            boundaryFingerprint: boundaryFingerprint,
+            occurredAt: occurredAt,
+            legacyID: legacyID,
+            currentID: currentID,
+            receiptKey: receiptKey
+        )
+
+        repository = try UsageRepository(url: databaseURL)
+        scanner = SessionScanner(repository: repository)
+    }
+
+    func totalUsage() async throws -> Int64 {
+        try await repository.queryUsage(from: nil, to: .distantFuture)
+            .map(\.usage.total)
+            .reduce(0, +)
+    }
+
+    func eventCount() throws -> Int {
+        try queryInteger("SELECT COUNT(*) FROM usage_events") ?? 0
+    }
+
+    func indexFormatVersion() throws -> Int? {
+        guard try queryInteger(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'index_metadata'"
+        ) == 1 else {
+            return nil
+        }
+        return try queryInteger(
+            "SELECT value FROM index_metadata WHERE key = 'event_identity_version' LIMIT 1"
+        )
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: directoryURL)
+    }
+
+    private func queryInteger(_ sql: String) throws -> Int? {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            databaseURL.path,
+            &handle,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not inspect identity fixture")
+        }
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
+        guard prepareResult == SQLITE_OK, let statement else {
+            throw SQLiteError(
+                code: prepareResult,
+                message: String(cString: sqlite3_errmsg(handle))
+            )
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private static func createVersionTwoDatabase(
+        at url: URL,
+        kind: Kind,
+        logURL: URL,
+        fileKey: String,
+        fileSize: Int,
+        boundaryFingerprint: String,
+        occurredAt: Date,
+        legacyID: String,
+        currentID: String,
+        receiptKey: String
+    ) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create identity fixture")
+        }
+        defer { sqlite3_close(handle) }
+
+        let hasFingerprint = kind == .fingerprintPatchedDuplicates
+        let fingerprintColumn = hasFingerprint ? ", boundary_fingerprint TEXT" : ""
+        let fingerprintName = hasFingerprint ? ", boundary_fingerprint" : ""
+        let fingerprintValue = hasFingerprint ? ", '\(sql(boundaryFingerprint))'" : ""
+        let duplicateEvent = kind == .fingerprintPatchedDuplicates
+            ? usageEventInsert(id: currentID, occurredAt: occurredAt)
+            : ""
+        let fixtureSQL =
+            """
+            CREATE TABLE sessions (
+              id TEXT PRIMARY KEY,
+              started_at REAL NOT NULL,
+              project_key TEXT NOT NULL,
+              project_name TEXT NOT NULL,
+              full_path TEXT
+            );
+            CREATE TABLE usage_events (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              occurred_at REAL NOT NULL,
+              last_input_tokens INTEGER,
+              last_cached_input_tokens INTEGER,
+              last_output_tokens INTEGER,
+              last_reasoning_output_tokens INTEGER,
+              last_total_tokens INTEGER,
+              cumulative_input_tokens INTEGER,
+              cumulative_cached_input_tokens INTEGER,
+              cumulative_output_tokens INTEGER,
+              cumulative_reasoning_output_tokens INTEGER,
+              cumulative_total_tokens INTEGER,
+              delta_input_tokens INTEGER NOT NULL,
+              delta_cached_input_tokens INTEGER NOT NULL,
+              delta_output_tokens INTEGER NOT NULL,
+              delta_reasoning_output_tokens INTEGER NOT NULL,
+              delta_total_tokens INTEGER NOT NULL
+            );
+            CREATE INDEX usage_events_time ON usage_events(occurred_at);
+            CREATE INDEX usage_events_session ON usage_events(session_id);
+            CREATE TABLE file_cursors (
+              file_key TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              byte_offset INTEGER NOT NULL,
+              modified_at REAL NOT NULL,
+              active_session_id TEXT\(fingerprintColumn)
+            );
+            CREATE TABLE cumulative_usage (
+              session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+              input_tokens INTEGER NOT NULL,
+              cached_input_tokens INTEGER NOT NULL,
+              output_tokens INTEGER NOT NULL,
+              reasoning_output_tokens INTEGER NOT NULL,
+              total_tokens INTEGER NOT NULL
+            );
+            CREATE TABLE rate_limits (
+              window_key TEXT PRIMARY KEY,
+              limit_id TEXT NOT NULL,
+              window_minutes INTEGER NOT NULL,
+              window_label TEXT,
+              used_percent REAL NOT NULL,
+              resets_at REAL NOT NULL,
+              observed_at REAL NOT NULL
+            );
+            CREATE TABLE notification_receipts (
+              receipt_key TEXT PRIMARY KEY,
+              sent_at REAL NOT NULL
+            );
+            INSERT INTO sessions (id, started_at, project_key, project_name, full_path)
+            VALUES (
+              'identity-upgrade', 1784084400,
+              '/synthetic/projects/identity-upgrade', 'identity-upgrade',
+              '/synthetic/projects/identity-upgrade'
+            );
+            \(usageEventInsert(id: legacyID, occurredAt: occurredAt))
+            \(duplicateEvent)
+            INSERT INTO file_cursors (
+              file_key, path, byte_offset, modified_at, active_session_id\(fingerprintName)
+            ) VALUES (
+              '\(sql(fileKey))', '\(sql(logURL.path))', \(fileSize), 1784084401,
+              'identity-upgrade'\(fingerprintValue)
+            );
+            INSERT INTO cumulative_usage (
+              session_id, input_tokens, cached_input_tokens, output_tokens,
+              reasoning_output_tokens, total_tokens
+            ) VALUES ('identity-upgrade', 10, 0, 0, 0, 10);
+            INSERT INTO rate_limits (
+              window_key, limit_id, window_minutes, window_label,
+              used_percent, resets_at, observed_at
+            ) VALUES ('five-hours', 'codex', 300, NULL, 28, 1784096400, 1784084401);
+            INSERT INTO notification_receipts (receipt_key, sent_at)
+            VALUES ('\(sql(receiptKey))', 1784084401);
+            PRAGMA user_version = 2;
+            """
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        let result = sqlite3_exec(handle, fixtureSQL, nil, nil, &errorMessage)
+        defer { sqlite3_free(errorMessage) }
+        guard result == SQLITE_OK else {
+            throw SQLiteError(
+                code: result,
+                message: errorMessage.map { String(cString: $0) } ?? "identity fixture SQL failed"
+            )
+        }
+    }
+
+    private static func usageEventInsert(id: String, occurredAt: Date) -> String {
+        """
+        INSERT INTO usage_events (
+          id, session_id, occurred_at,
+          last_input_tokens, last_cached_input_tokens, last_output_tokens,
+          last_reasoning_output_tokens, last_total_tokens,
+          cumulative_input_tokens, cumulative_cached_input_tokens,
+          cumulative_output_tokens, cumulative_reasoning_output_tokens,
+          cumulative_total_tokens, delta_input_tokens, delta_cached_input_tokens,
+          delta_output_tokens, delta_reasoning_output_tokens, delta_total_tokens
+        ) VALUES (
+          '\(sql(id))', 'identity-upgrade', \(occurredAt.timeIntervalSince1970),
+          10, 0, 0, 0, 10,
+          10, 0, 0, 0, 10,
+          10, 0, 0, 0, 10
+        );
+        """
+    }
+
+    private static func legacyIdentity(
+        sessionID: String,
+        event: ParsedTokenEvent
+    ) -> String {
+        var payload = Data()
+        let sessionData = Data(sessionID.utf8)
+        append(Int64(sessionData.count), to: &payload)
+        payload.append(sessionData)
+        append(
+            Int64((event.occurredAt.timeIntervalSince1970 * 1_000).rounded()),
+            to: &payload
+        )
+        append(event.lastUsage, to: &payload)
+        append(event.cumulativeUsage, to: &payload)
+        return SHA256.hash(data: payload)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func append(_ usage: TokenUsage?, to data: inout Data) {
+        guard let usage else {
+            data.append(0)
+            return
+        }
+        data.append(1)
+        append(usage.input, to: &data)
+        append(usage.cachedInput, to: &data)
+        append(usage.output, to: &data)
+        append(usage.reasoningOutput, to: &data)
+        append(usage.total, to: &data)
+    }
+
+    private static func append(_ integer: Int64, to data: inout Data) {
+        var bigEndian = integer.bigEndian
+        withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+
+    private static func date(_ value: String) throws -> Date {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = formatter.date(from: value) else {
+            throw SQLiteError(code: SQLITE_MISMATCH, message: "invalid identity fixture date")
+        }
+        return date
+    }
+
+    private static func fileKey(for url: URL) throws -> String {
+        let values = try url.resourceValues(forKeys: [.fileResourceIdentifierKey])
+        return values.fileResourceIdentifier
+            .map { String(describing: $0) }
+            ?? url.standardizedFileURL.path
+    }
+
+    private static func sql(_ value: String) -> String {
+        value.replacingOccurrences(of: "'", with: "''")
     }
 }
 

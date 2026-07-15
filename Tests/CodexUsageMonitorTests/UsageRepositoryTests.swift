@@ -6,6 +6,35 @@ import Testing
 @Suite
 struct UsageRepositoryTests {
     @Test
+    func newDatabaseWritesCurrentEventIdentityMarkerImmediately() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+
+        try await repository.migrate()
+
+        let hasMetadataTable = try queryRawInteger(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'index_metadata'",
+            at: databaseURL
+        ) == 1
+        #expect(hasMetadataTable)
+        if hasMetadataTable {
+            #expect(try queryRawInteger(
+                "SELECT value FROM index_metadata WHERE key = 'event_identity_version'",
+                at: databaseURL
+            ) == 2)
+        }
+
+        try await repository.migrate()
+        if hasMetadataTable {
+            #expect(try queryRawInteger(
+                "SELECT value FROM index_metadata WHERE key = 'event_identity_version'",
+                at: databaseURL
+            ) == 2)
+        }
+    }
+
+    @Test
     func duplicateLogicalEventsAcrossFileBatchesAreCountedOnce() async throws {
         let fixture = try await RepositoryBatchFixture()
         defer { fixture.remove() }
