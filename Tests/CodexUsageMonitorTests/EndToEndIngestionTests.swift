@@ -85,6 +85,69 @@ struct EndToEndIngestionTests {
     }
 
     @Test
+    func branchedHistoryIsDeduplicatedAndAppendUpdatesWithinTwoSeconds() async throws {
+        let fixture = try EndToEndFixture()
+        defer { fixture.remove() }
+        let parentSession = fixture.sessionLine(
+            sessionID: "parent-session",
+            project: "parent-project",
+            timestamp: "2026-07-15T03:00:00Z"
+        )
+        let parentToken = fixture.tokenLine(
+            timestamp: "2026-07-15T03:00:01Z",
+            last: TokenUsage(input: 10, cachedInput: 0, output: 0, reasoningOutput: 0, total: 10),
+            cumulative: TokenUsage(input: 10, cachedInput: 0, output: 0, reasoningOutput: 0, total: 10)
+        )
+        _ = try fixture.writeLines(
+            root: fixture.sessionsRoot,
+            relativePath: "parent.jsonl",
+            lines: [parentSession, parentToken]
+        )
+        let childURL = try fixture.writeLines(
+            root: fixture.sessionsRoot,
+            relativePath: "branches/child.jsonl",
+            lines: [
+                parentSession,
+                parentToken,
+                fixture.sessionLine(
+                    sessionID: "child-session",
+                    project: "child-project",
+                    timestamp: "2026-07-15T03:00:02Z"
+                ),
+                fixture.tokenLine(
+                    timestamp: "2026-07-15T03:00:03Z",
+                    last: TokenUsage(input: 20, cachedInput: 0, output: 0, reasoningOutput: 0, total: 20),
+                    cumulative: TokenUsage(input: 20, cachedInput: 0, output: 0, reasoningOutput: 0, total: 20),
+                    limits: true,
+                    includeFiveHourLimit: false
+                )
+            ]
+        )
+
+        await fixture.coordinator.start()
+        let initial = try await fixture.snapshot()
+
+        #expect(initial.total.total == 30)
+        #expect(
+            Dictionary(uniqueKeysWithValues: initial.projects.map { ($0.displayName, $0.usage.total) })
+                == ["child-project": 20, "parent-project": 10]
+        )
+        #expect(initial.limits.map(\.window) == [.week])
+
+        try fixture.appendToken(
+            to: childURL,
+            timestamp: "2026-07-15T03:00:04Z",
+            last: TokenUsage(input: 5, cachedInput: 0, output: 0, reasoningOutput: 0, total: 5),
+            cumulative: TokenUsage(input: 25, cachedInput: 0, output: 0, reasoningOutput: 0, total: 25)
+        )
+
+        #expect(try await fixture.waitForTotal(35, timeout: .seconds(2)))
+        await fixture.coordinator.rescanAll()
+        #expect(try await fixture.snapshot().total.total == 35)
+        await fixture.coordinator.stop()
+    }
+
+    @Test
     func malformedMiddleIncompleteTailAndTruncationRecoverWithoutLosingUsage() async throws {
         let fixture = try EndToEndFixture()
         defer { fixture.remove() }
@@ -281,6 +344,17 @@ private final class EndToEndFixture: @unchecked Sendable {
         return url
     }
 
+    @discardableResult
+    func writeLines(root: URL, relativePath: String, lines: [String]) throws -> URL {
+        let url = root.appending(path: relativePath)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: url)
+        return url
+    }
+
     func appendToken(to url: URL, timestamp: String, last: TokenUsage, cumulative: TokenUsage) throws {
         try appendRaw(
             tokenLine(timestamp: timestamp, last: last, cumulative: cumulative) + "\n",
@@ -313,11 +387,15 @@ private final class EndToEndFixture: @unchecked Sendable {
         timestamp: String,
         last: TokenUsage?,
         cumulative: TokenUsage,
-        limits: Bool = false
+        limits: Bool = false,
+        includeFiveHourLimit: Bool = true
     ) -> String {
         let lastJSON = last.map { "\"last_token_usage\":\(usageJSON($0))," } ?? ""
+        let fiveHourJSON = includeFiveHourLimit
+            ? ",\"primary\":{\"used_percent\":28,\"window_minutes\":300,\"resets_at\":1784096400}"
+            : ""
         let limitsJSON = limits
-            ? ",\"rate_limits\":{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":28,\"window_minutes\":300,\"resets_at\":1784096400},\"secondary\":{\"used_percent\":52,\"window_minutes\":10080,\"resets_at\":1784701200}}"
+            ? ",\"rate_limits\":{\"limit_id\":\"codex\"\(fiveHourJSON),\"secondary\":{\"used_percent\":52,\"window_minutes\":10080,\"resets_at\":1784701200}}"
             : ""
         return """
         {"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{\(lastJSON)"total_token_usage":\(usageJSON(cumulative))}\(limitsJSON)}}
