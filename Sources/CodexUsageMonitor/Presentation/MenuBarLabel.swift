@@ -28,7 +28,6 @@ func limitColor(remaining: Double) -> Color {
 @MainActor
 struct MenuBarLabel: View {
     let snapshot: DashboardSnapshot
-    let runtime: AppRuntime
 
     var body: some View {
         TimelineView(
@@ -48,7 +47,6 @@ struct MenuBarLabel: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Codex 用量，\(title)")
         }
-        .task { await runtime.launch() }
     }
 
     private func labelStyle(limits: [LimitStatus]) -> AnyShapeStyle {

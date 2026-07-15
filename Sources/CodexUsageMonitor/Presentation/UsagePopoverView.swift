@@ -5,16 +5,19 @@ import SwiftUI
 struct UsagePopoverView: View {
     @Bindable var model: UsageViewModel
     private let launchAtLogin: any LaunchAtLoginServicing
+    private let dashboard: (any DashboardPresenting)?
     @AppStorage("didAskLaunchAtLogin") private var didAskLaunchAtLogin = false
     @State private var showLaunchAtLoginPrompt = false
     @State private var launchPromptError: String?
 
     init(
         model: UsageViewModel,
-        launchAtLogin: any LaunchAtLoginServicing = LaunchAtLoginController()
+        launchAtLogin: any LaunchAtLoginServicing = LaunchAtLoginController(),
+        dashboard: (any DashboardPresenting)? = nil
     ) {
         self.model = model
         self.launchAtLogin = launchAtLogin
+        self.dashboard = dashboard
     }
 
     var body: some View {
@@ -156,6 +159,15 @@ struct UsagePopoverView: View {
             }
 
             Spacer()
+
+            if let dashboard {
+                Button {
+                    dashboard.showDashboard()
+                } label: {
+                    Label("打开完整统计", systemImage: "macwindow")
+                }
+                .help("打开完整统计")
+            }
 
             Button {
                 Task { await model.retry() }

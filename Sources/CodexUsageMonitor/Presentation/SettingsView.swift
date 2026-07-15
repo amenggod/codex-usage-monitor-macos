@@ -76,30 +76,29 @@ final class SettingsViewState {
 struct SettingsView: View {
     let model: UsageViewModel
     @State private var state: SettingsViewState
-    @State private var presentationCoordinator: AppPresentationCoordinator
+    @State private var menuBarVisibilityStore: MenuBarVisibilityStore
 
     init(
         model: UsageViewModel,
         launchAtLogin: any LaunchAtLoginServicing = LaunchAtLoginController(),
         notificationSender: any NotificationSending = UserNotificationSender(),
-        presentationCoordinator: AppPresentationCoordinator
+        menuBarVisibilityStore: MenuBarVisibilityStore
     ) {
         self.model = model
         _state = State(initialValue: SettingsViewState(
             launchAtLogin: launchAtLogin,
             notificationSender: notificationSender
         ))
-        _presentationCoordinator = State(initialValue: presentationCoordinator)
+        _menuBarVisibilityStore = State(initialValue: menuBarVisibilityStore)
     }
 
     var body: some View {
         Form {
             Section("显示") {
-                Picker("显示位置", selection: displayModeBinding) {
-                    Text("桌面").tag(DisplayMode.desktop)
-                    Text("菜单栏").tag(DisplayMode.menuBar)
-                    Text("桌面与菜单栏").tag(DisplayMode.both)
-                }
+                Toggle("显示顶部菜单栏", isOn: menuBarVisibilityBinding)
+                Text("桌面小组件由 macOS 管理：在桌面空白处右键，选择“编辑小组件”，然后搜索 Codex Usage Monitor。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("启动") {
@@ -146,10 +145,10 @@ struct SettingsView: View {
         )
     }
 
-    var displayModeBinding: Binding<DisplayMode> {
+    var menuBarVisibilityBinding: Binding<Bool> {
         Binding(
-            get: { presentationCoordinator.mode },
-            set: { presentationCoordinator.setMode($0) }
+            get: { menuBarVisibilityStore.isVisible },
+            set: { menuBarVisibilityStore.setVisible($0) }
         )
     }
 

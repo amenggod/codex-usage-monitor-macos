@@ -88,180 +88,26 @@ struct AppPresentationStateTests {
     }
 
     @MainActor
-    @Test func coordinatorRoutesAllModesAndSynchronizesMenuBarInsertion() throws {
-        let suiteName = "PresentationCoordinatorTests-\(UUID().uuidString)"
+    @Test func settingsMenuBarVisibilityBindingUpdatesInjectedStoreAndPersists() throws {
+        let suiteName = "MenuBarVisibilityTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = DisplayModeStore(defaults: defaults)
-        let desktop = DesktopPresentationControllerSpy()
-        let coordinator = AppPresentationCoordinator(
-            displayModeStore: store,
-            desktopPresentationController: desktop,
-            notificationCenter: NotificationCenter()
-        )
-
-        coordinator.setMode(.desktop)
-        #expect(!coordinator.isMenuBarInserted)
-        coordinator.setMode(.menuBar)
-        #expect(coordinator.isMenuBarInserted)
-        coordinator.setMode(.both)
-        #expect(coordinator.isMenuBarInserted)
-
-        #expect(store.mode == .both)
-        #expect(desktop.appliedModes == [.desktop, .menuBar, .both])
-    }
-
-    @MainActor
-    @Test func coordinatorRoutesReopenNotificationToDesktopPresenter() throws {
-        let suiteName = "PresentationReopenCoordinatorTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let center = NotificationCenter()
-        let desktop = DesktopPresentationControllerSpy()
-        let coordinator = AppPresentationCoordinator(
-            displayModeStore: DisplayModeStore(defaults: defaults),
-            desktopPresentationController: desktop,
-            notificationCenter: center
-        )
-
-        center.post(name: .codexUsageMonitorReopenRequested, object: nil)
-
-        #expect(desktop.reopenCount == 1)
-        _ = coordinator
-    }
-
-    @MainActor
-    @Test func desktopAndBothModesShowCardWhileMenuBarModeHidesIt() throws {
-        let suiteName = "PresentationModeTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let surface = DesktopCardSurfaceSpy()
-        let controller = DesktopCardPresentationController(
-            surface: surface,
-            displayModeStore: DisplayModeStore(defaults: defaults)
-        )
-
-        controller.apply(mode: .desktop)
-        controller.apply(mode: .menuBar)
-        controller.apply(mode: .both)
-
-        #expect(surface.events == [.show, .hide, .show])
-    }
-
-    @MainActor
-    @Test func desktopControllerApplyDoesNotPersistMode() throws {
-        let suiteName = "PresentationPersistenceTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = DisplayModeStore(defaults: defaults)
-        let surface = DesktopCardSurfaceSpy()
-        let controller = DesktopCardPresentationController(
-            surface: surface,
-            displayModeStore: store
-        )
-
-        controller.apply(mode: .menuBar)
-
-        #expect(surface.events == [.hide])
-        #expect(store.mode == .desktop)
-        #expect(DisplayModeStore(defaults: defaults).mode == .desktop)
-    }
-
-    @MainActor
-    @Test func reopenShowsCardOnlyWhenCurrentModeIncludesDesktop() throws {
-        let suiteName = "PresentationReopenTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let surface = DesktopCardSurfaceSpy()
-        let controller = DesktopCardPresentationController(
-            surface: surface,
-            displayModeStore: DisplayModeStore(defaults: defaults)
-        )
-
-        controller.apply(mode: .menuBar)
-        surface.events.removeAll()
-        controller.handleReopen()
-        #expect(surface.events.isEmpty)
-
-        controller.apply(mode: .desktop)
-        surface.events.removeAll()
-        controller.handleReopen()
-        #expect(surface.events == [.show])
-
-        controller.apply(mode: .both)
-        surface.events.removeAll()
-        controller.handleReopen()
-        #expect(surface.events == [.show])
-    }
-
-    @MainActor
-    @Test func displayModeDefaultsToDesktopAndPersists() throws {
-        let suiteName = "DisplayModeTests-\(UUID().uuidString)"
-        let suite = try #require(UserDefaults(suiteName: suiteName))
-        defer { suite.removePersistentDomain(forName: suiteName) }
-        let first = DisplayModeStore(defaults: suite)
-
-        #expect(first.mode == .desktop)
-        #expect(first.showsDesktopCard)
-        #expect(!first.showsMenuBar)
-
-        first.setMode(.both)
-        let reopened = DisplayModeStore(defaults: suite)
-        #expect(reopened.mode == .both)
-        #expect(reopened.showsDesktopCard)
-        #expect(reopened.showsMenuBar)
-    }
-
-    @MainActor
-    @Test(arguments: [
-        (DisplayMode.desktop, true, false),
-        (DisplayMode.menuBar, false, true),
-        (DisplayMode.both, true, true),
-    ])
-    func modesExposeDesktopAndMenuBarVisibility(
-        mode: DisplayMode,
-        showsDesktopCard: Bool,
-        showsMenuBar: Bool
-    ) throws {
-        let suiteName = "DisplayModeTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = DisplayModeStore(defaults: defaults)
-        store.setMode(mode)
-
-        #expect(store.showsDesktopCard == showsDesktopCard)
-        #expect(store.showsMenuBar == showsMenuBar)
-    }
-
-    @MainActor
-    @Test func settingsDisplayModeBindingUpdatesInjectedStoreAndPersists() throws {
-        let suiteName = "DisplayModeTests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = DisplayModeStore(defaults: defaults)
-        let desktop = DesktopPresentationControllerSpy()
-        let coordinator = AppPresentationCoordinator(
-            displayModeStore: store,
-            desktopPresentationController: desktop,
-            notificationCenter: NotificationCenter()
-        )
+        let store = MenuBarVisibilityStore(defaults: defaults)
         let settings = SettingsView(
             model: LiveDependencies.makeFailureViewModel(
                 error: PresentationTestFailure(message: "unused")
             ),
             launchAtLogin: LaunchAtLoginServiceSpy(enabled: false),
             notificationSender: PresentationNotificationSenderSpy(enabled: false),
-            presentationCoordinator: coordinator
+            menuBarVisibilityStore: store
         )
 
-        let binding = settings.displayModeBinding
-        #expect(binding.wrappedValue == .desktop)
-        binding.wrappedValue = .both
+        let binding = settings.menuBarVisibilityBinding
+        #expect(!binding.wrappedValue)
+        binding.wrappedValue = true
 
-        #expect(store.mode == .both)
-        #expect(DisplayModeStore(defaults: defaults).mode == .both)
-        #expect(coordinator.isMenuBarInserted)
-        #expect(desktop.appliedModes == [.both])
+        #expect(store.isVisible)
+        #expect(MenuBarVisibilityStore(defaults: defaults).isVisible)
     }
 
     @MainActor
@@ -372,43 +218,6 @@ struct AppPresentationStateTests {
         #expect(state.tenPercentNotificationsEnabled)
         #expect(await !sender.isThresholdEnabled(20))
         #expect(await sender.isThresholdEnabled(10))
-    }
-}
-
-@MainActor
-private final class DesktopPresentationControllerSpy: DesktopCardPresentationControlling {
-    private(set) var appliedModes: [DisplayMode] = []
-    private(set) var reopenCount = 0
-
-    func apply(mode: DisplayMode) {
-        appliedModes.append(mode)
-    }
-
-    func handleReopen() {
-        reopenCount += 1
-    }
-}
-
-@MainActor
-private final class DesktopCardSurfaceSpy: DesktopCardPresenting {
-    enum Event: Equatable {
-        case show
-        case hide
-        case setExpanded(Bool)
-    }
-
-    var events: [Event] = []
-
-    func show() {
-        events.append(.show)
-    }
-
-    func hide() {
-        events.append(.hide)
-    }
-
-    func setExpanded(_ expanded: Bool) {
-        events.append(.setExpanded(expanded))
     }
 }
 
