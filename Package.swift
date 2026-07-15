@@ -20,7 +20,10 @@ let testingLinkerSettings: [LinkerSetting] = FileManager.default.fileExists(
 let package = Package(
     name: "CodexUsageMonitor",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "CodexUsageMonitor", targets: ["CodexUsageMonitor"])],
+    products: [
+        .library(name: "CodexUsageShared", targets: ["CodexUsageShared"]),
+        .executable(name: "CodexUsageMonitor", targets: ["CodexUsageMonitor"]),
+    ],
     dependencies: [
         .package(
             url: "https://github.com/swiftlang/swift-testing.git",
@@ -28,17 +31,28 @@ let package = Package(
         )
     ],
     targets: [
+        .target(name: "CodexUsageShared"),
         .executableTarget(
             name: "CodexUsageMonitor",
+            dependencies: ["CodexUsageShared"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .testTarget(
             name: "CodexUsageMonitorTests",
             dependencies: [
                 "CodexUsageMonitor",
+                "CodexUsageShared",
                 .product(name: "Testing", package: "swift-testing")
             ],
             resources: [.copy("Fixtures")],
+            linkerSettings: testingLinkerSettings
+        ),
+        .testTarget(
+            name: "CodexUsageSharedTests",
+            dependencies: [
+                "CodexUsageShared",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
             linkerSettings: testingLinkerSettings
         )
     ],
