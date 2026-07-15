@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 struct ScanResult: Equatable, Sendable {
@@ -29,7 +28,8 @@ actor SessionScanner {
         let modifiedAt = values.contentModificationDate ?? .distantPast
         let savedCursor = try await repository.cursor(for: fileKey)
         let savedOffset = savedCursor?.offset ?? 0
-        let startOffset = savedOffset > fileSize ? 0 : savedOffset
+        let wasTruncated = savedOffset > fileSize
+        let startOffset = wasTruncated ? 0 : savedOffset
 
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
@@ -40,56 +40,50 @@ actor SessionScanner {
         }
 
         let complete = available[available.startIndex...finalNewline]
-        var lineStartOffset = startOffset
-        var sessionID = try await repository.sessionID(forFileKey: fileKey)
+        var activeSessionID = wasTruncated ? nil : savedCursor?.activeSessionID
+        var sessions: [SessionUpsert] = []
+        var events: [LogicalTokenEvent] = []
+        var limits: [RateLimitObservation] = []
         var processedLines = 0
 
         for rawLine in complete.split(separator: 0x0A, omittingEmptySubsequences: false) {
             let line = Data(rawLine)
-            defer { lineStartOffset += UInt64(rawLine.count + 1) }
             guard !line.isEmpty, let event = parser.parse(line: line) else { continue }
             processedLines += 1
 
             switch event {
             case let .session(metadata):
-                sessionID = metadata.sessionID
-                let project = normalizer.identity(for: metadata.workingDirectory)
-                try await repository.upsertSession(
-                    metadata,
-                    fileKey: fileKey,
-                    project: project
-                )
+                activeSessionID = metadata.sessionID
+                sessions.append(SessionUpsert(
+                    metadata: metadata,
+                    project: normalizer.identity(for: metadata.workingDirectory)
+                ))
 
             case let .token(token):
-                guard let sessionID else { continue }
-                let previous = try await repository.previousCumulativeUsage(sessionID: sessionID)
-                let usage = TokenDeltaCalculator.delta(
-                    lastUsage: token.lastUsage,
-                    cumulativeUsage: token.cumulativeUsage,
-                    previousCumulative: previous
-                )
-                let digest = SHA256.hash(data: line)
-                    .map { String(format: "%02x", $0) }
-                    .joined()
-                try await repository.insertUsageEvent(
-                    id: "\(fileKey):\(lineStartOffset):\(digest)",
-                    sessionID: sessionID,
+                guard let activeSessionID else { continue }
+                events.append(LogicalTokenEvent(
+                    id: TokenEventIdentity.make(sessionID: activeSessionID, event: token),
+                    sessionID: activeSessionID,
                     occurredAt: token.occurredAt,
-                    usage: usage
-                )
-                if let cumulative = token.cumulativeUsage {
-                    try await repository.saveCumulativeUsage(cumulative, sessionID: sessionID)
-                }
-                try await repository.replaceLatestLimits(token.limits)
+                    lastUsage: token.lastUsage,
+                    cumulativeUsage: token.cumulativeUsage
+                ))
+                limits.append(contentsOf: token.limits)
             }
         }
 
         let finalOffset = startOffset + UInt64(complete.count)
-        try await repository.saveCursor(FileCursor(
-            fileKey: fileKey,
-            path: fileURL.path,
-            offset: finalOffset,
-            modifiedAt: modifiedAt
+        _ = try await repository.apply(FileIngestionBatch(
+            sessions: sessions,
+            events: events,
+            limits: limits,
+            cursor: FileCursor(
+                fileKey: fileKey,
+                path: fileURL.path,
+                offset: finalOffset,
+                modifiedAt: modifiedAt,
+                activeSessionID: activeSessionID
+            )
         ))
         return ScanResult(processedLines: processedLines, finalOffset: finalOffset)
     }

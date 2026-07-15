@@ -51,7 +51,6 @@ struct UsageAggregatorTests {
             repository: repository,
             id: "today",
             sessionID: "range-session",
-            fileKey: "range-file",
             project: project,
             occurredAt: dayStart.addingTimeInterval(60 * 60),
             usage: usage(total: 1)
@@ -90,7 +89,6 @@ struct UsageAggregatorTests {
             repository: repository,
             id: "alpha-event",
             sessionID: "alpha-session",
-            fileKey: "alpha-file",
             project: ProjectIdentity(key: "/synthetic/alpha", displayName: "alpha", fullPath: "/synthetic/alpha"),
             occurredAt: now.addingTimeInterval(-10),
             usage: TokenUsage(input: 10, cachedInput: 2, output: 3, reasoningOutput: 1, total: 20)
@@ -99,7 +97,6 @@ struct UsageAggregatorTests {
             repository: repository,
             id: "shared-first-event",
             sessionID: "shared-first-session",
-            fileKey: "shared-first-file",
             project: ProjectIdentity(
                 key: "/synthetic/first/shared",
                 displayName: "shared",
@@ -112,7 +109,6 @@ struct UsageAggregatorTests {
             repository: repository,
             id: "shared-second-event",
             sessionID: "shared-second-session",
-            fileKey: "shared-second-file",
             project: ProjectIdentity(
                 key: "/synthetic/second/shared",
                 displayName: "shared",
@@ -182,14 +178,12 @@ private func insertAggregationEvent(
     repository: UsageRepository,
     id: String,
     sessionID: String,
-    fileKey: String,
     project: ProjectIdentity,
     occurredAt: Date,
     usage: TokenUsage
 ) async throws {
     try await repository.upsertSession(
         SessionMetadata(sessionID: sessionID, startedAt: occurredAt, workingDirectory: project.fullPath),
-        fileKey: fileKey,
         project: project
     )
     try await repository.insertUsageEvent(

@@ -188,65 +188,6 @@ struct UsageRepositoryTests {
     }
 
     @Test
-    func sessionCanBeFoundByFileKey() async throws {
-        let databaseURL = temporaryDatabaseURL()
-        defer { removeDatabase(at: databaseURL) }
-        let repository = try UsageRepository(url: databaseURL)
-        try await repository.migrate()
-        let project = ProjectIdentity(key: "unknown", displayName: "未知项目", fullPath: nil)
-        try await repository.upsertSession(
-            SessionMetadata(
-                sessionID: "session-with-bound-strings",
-                startedAt: Date(timeIntervalSince1970: 100),
-                workingDirectory: nil
-            ),
-            fileKey: "file-'?; DROP TABLE sessions; --",
-            project: project
-        )
-
-        let sessionID = try await repository.sessionID(forFileKey: "file-'?; DROP TABLE sessions; --")
-
-        #expect(sessionID == "session-with-bound-strings")
-    }
-
-    @Test
-    func legacySessionLookupKeepsPersistedActiveSessionAcrossRepositoryReopen() async throws {
-        let databaseURL = temporaryDatabaseURL()
-        defer { removeDatabase(at: databaseURL) }
-        let project = ProjectIdentity(key: "unknown", displayName: "未知项目", fullPath: nil)
-        let firstRepository = try UsageRepository(url: databaseURL)
-        try await firstRepository.migrate()
-        try await firstRepository.upsertSession(
-            SessionMetadata(
-                sessionID: "persisted-session",
-                startedAt: Date(timeIntervalSince1970: 100),
-                workingDirectory: nil
-            ),
-            fileKey: "file-1",
-            project: project
-        )
-        try await firstRepository.saveCursor(FileCursor(
-            fileKey: "file-1",
-            path: "/synthetic/session.jsonl",
-            offset: 10,
-            modifiedAt: Date(timeIntervalSince1970: 100)
-        ))
-
-        let reopenedRepository = try UsageRepository(url: databaseURL)
-        try await reopenedRepository.migrate()
-        #expect(try await reopenedRepository.sessionID(forFileKey: "file-1") == "persisted-session")
-
-        try await reopenedRepository.saveCursor(FileCursor(
-            fileKey: "file-1",
-            path: "/synthetic/session.jsonl",
-            offset: 20,
-            modifiedAt: Date(timeIntervalSince1970: 200)
-        ))
-
-        #expect(try await reopenedRepository.cursor(for: "file-1")?.activeSessionID == "persisted-session")
-    }
-
-    @Test
     func cumulativeUsageRoundTripsAndKeepsAuthoritativeTotal() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }

@@ -37,9 +37,6 @@ actor UsageRepository {
     }
 
     private let database: SQLiteDatabase
-    // Transitional state used only by the legacy SessionScanner entry points below.
-    // Task 3 must remove this bridge when the scanner writes activeSessionID directly.
-    private var legacySessionIDsByFileKey: [String: String] = [:]
 
     init(url: URL) throws {
         database = try SQLiteDatabase(url: url)
@@ -113,27 +110,6 @@ actor UsageRepository {
                 project.fullPath.map(SQLiteValue.text) ?? .null
             ]
         )
-    }
-
-    // Compatibility for the existing SessionScanner only. Task 3 must remove this
-    // overload after the scanner adopts FileCursor.activeSessionID.
-    func upsertSession(
-        _ metadata: SessionMetadata,
-        fileKey: String,
-        project: ProjectIdentity
-    ) throws {
-        try upsertSession(metadata, project: project)
-        legacySessionIDsByFileKey[fileKey] = metadata.sessionID
-    }
-
-    // Compatibility for the existing SessionScanner only. New code reads the
-    // active session from FileCursor; Task 3 must remove this method.
-    func sessionID(forFileKey fileKey: String) throws -> String? {
-        if let activeSessionID = try cursor(for: fileKey)?.activeSessionID {
-            legacySessionIDsByFileKey[fileKey] = activeSessionID
-            return activeSessionID
-        }
-        return legacySessionIDsByFileKey[fileKey]
     }
 
     func insertUsageEvent(
@@ -340,12 +316,10 @@ actor UsageRepository {
     }
 
     func saveCursor(_ cursor: FileCursor) throws {
-        let activeSessionID = cursor.activeSessionID ?? legacySessionIDsByFileKey[cursor.fileKey]
-        try persistCursor(cursor, activeSessionID: activeSessionID)
+        try persistCursor(cursor)
     }
 
-    private func persistCursor(_ cursor: FileCursor, activeSessionID: String? = nil) throws {
-        let activeSessionID = activeSessionID ?? cursor.activeSessionID
+    private func persistCursor(_ cursor: FileCursor) throws {
         try database.execute(
             """
             INSERT INTO file_cursors (file_key, path, byte_offset, modified_at, active_session_id)
@@ -361,7 +335,7 @@ actor UsageRepository {
                 .text(cursor.path),
                 .integer(Int64(bitPattern: cursor.offset)),
                 .real(cursor.modifiedAt.timeIntervalSince1970),
-                activeSessionID.map(SQLiteValue.text) ?? .null
+                cursor.activeSessionID.map(SQLiteValue.text) ?? .null
             ]
         )
     }
