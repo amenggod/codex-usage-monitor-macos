@@ -5,6 +5,25 @@ import Testing
 
 @Suite("NotificationCoordinatorTests")
 struct NotificationCoordinatorTests {
+    @Test func filteredExpiredLimitsDoNotSendNotifications() async throws {
+        let database = try TemporaryNotificationDatabase()
+        try await database.repository.migrate()
+        let sender = NotificationSenderSpy()
+        let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+        let now = Date(timeIntervalSince1970: 2_000)
+        let expired = RateLimitObservation(
+            limitID: "codex",
+            window: .fiveHours,
+            usedPercent: 95,
+            resetsAt: now,
+            observedAt: now.addingTimeInterval(-100)
+        )
+
+        await coordinator.evaluate(LimitAvailabilityPolicy.activeStatuses(from: [expired], now: now))
+
+        #expect(await sender.attemptedThresholds.isEmpty)
+    }
+
     @Test func thresholdsAreStrictAndTwentyPrecedesTen() async throws {
         let database = try TemporaryNotificationDatabase()
         try await database.repository.migrate()

@@ -69,9 +69,10 @@ struct UsageAggregator: UsageAggregating, Sendable {
                 total: partial.total + project.usage.total
             )
         }
-        let limits = try await repository.latestLimits().map {
-            LimitStatus(window: $0.window, usedPercent: $0.usedPercent, resetsAt: $0.resetsAt)
-        }
+        let limits = LimitAvailabilityPolicy.activeStatuses(
+            from: try await repository.latestLimits(),
+            now: now
+        )
 
         return DashboardSnapshot(
             range: range,

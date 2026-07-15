@@ -4,9 +4,17 @@ enum MenuBarFormatter {
     static func title(limits: [LimitStatus]) -> String {
         let fiveHours = limits.first { $0.window == .fiveHours }
         let week = limits.first { $0.window == .week }
-        guard let fiveHours, let week else { return "Codex --" }
 
-        return "5h \(Int(fiveHours.remainingPercent.rounded()))% · 周 \(Int(week.remainingPercent.rounded()))%"
+        return switch (fiveHours, week) {
+        case let (.some(fiveHours), .some(week)):
+            "5h \(Int(fiveHours.remainingPercent.rounded()))% · 周 \(Int(week.remainingPercent.rounded()))%"
+        case let (.some(fiveHours), .none):
+            "5h \(Int(fiveHours.remainingPercent.rounded()))%"
+        case let (.none, .some(week)):
+            "周 \(Int(week.remainingPercent.rounded()))%"
+        case (.none, .none):
+            "Codex --"
+        }
     }
 }
 

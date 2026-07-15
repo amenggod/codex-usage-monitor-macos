@@ -156,6 +156,40 @@ struct UsageAggregatorTests {
         #expect(snapshot.projects.isEmpty)
         #expect(snapshot.freshness == .noData)
     }
+
+    @Test
+    func snapshotOmitsExpiredLimitsAndKeepsAnActiveSingleWindow() async throws {
+        let databaseURL = temporaryAggregationDatabaseURL()
+        defer { removeAggregationDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        let now = Date(timeIntervalSince1970: 2_000)
+        let expiredFiveHours = RateLimitObservation(
+            limitID: "codex",
+            window: .fiveHours,
+            usedPercent: 80,
+            resetsAt: now,
+            observedAt: now.addingTimeInterval(-100)
+        )
+        let activeWeek = RateLimitObservation(
+            limitID: "codex",
+            window: .week,
+            usedPercent: 52,
+            resetsAt: now.addingTimeInterval(1_000),
+            observedAt: now
+        )
+        try await repository.replaceLatestLimits([expiredFiveHours, activeWeek])
+
+        let snapshot = try await UsageAggregator(repository: repository).snapshot(
+            range: .all,
+            now: now,
+            calendar: .current
+        )
+
+        #expect(snapshot.limits == [
+            LimitStatus(window: .week, usedPercent: 52, resetsAt: activeWeek.resetsAt),
+        ])
+    }
 }
 
 private func temporaryAggregationDatabaseURL() -> URL {

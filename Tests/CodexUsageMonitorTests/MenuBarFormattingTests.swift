@@ -13,11 +13,20 @@ struct MenuBarFormattingTests {
         #expect(MenuBarFormatter.title(limits: limits) == "5h 72% · 周 48%")
     }
 
-    @Test func missingLimitsShowsWaitingCopy() {
-        #expect(MenuBarFormatter.title(limits: []) == "Codex --")
+    @Test func singleWeekWindowShowsItsRemainingPercent() {
+        #expect(MenuBarFormatter.title(limits: [
+            LimitStatus(window: .week, usedPercent: 52, resetsAt: .distantFuture),
+        ]) == "周 48%")
+    }
+
+    @Test func singleFiveHourWindowShowsItsRemainingPercent() {
         #expect(MenuBarFormatter.title(limits: [
             LimitStatus(window: .fiveHours, usedPercent: 28, resetsAt: .distantFuture),
-        ]) == "Codex --")
+        ]) == "5h 72%")
+    }
+
+    @Test func missingLimitsShowsWaitingCopy() {
+        #expect(MenuBarFormatter.title(limits: []) == "Codex --")
     }
 
     @Test func projectAccessibilityTextNeverContainsFullPath() {
