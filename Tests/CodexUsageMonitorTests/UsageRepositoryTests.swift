@@ -6,6 +6,63 @@ import Testing
 @Suite
 struct UsageRepositoryTests {
     @Test
+    func v1MigrationCreatesMultiSessionSchemaAndPreservesReceipts() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        try createVersionOneDatabase(
+            at: databaseURL,
+            receiptKey: "week|4000|20"
+        )
+        let repository = try UsageRepository(url: databaseURL)
+
+        try await repository.migrate()
+
+        #expect(try userVersion(at: databaseURL) == 2)
+        #expect(try !columnNames(table: "sessions", at: databaseURL).contains("file_key"))
+        #expect(try columnNames(table: "file_cursors", at: databaseURL).contains("active_session_id"))
+        #expect(try await repository.notificationWasSent("week|4000|20"))
+    }
+
+    @Test
+    func cursorRoundTripsActiveSessionID() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        let cursor = FileCursor(
+            fileKey: "file-1",
+            path: "/synthetic/session.jsonl",
+            offset: 42,
+            modifiedAt: Date(timeIntervalSince1970: 123),
+            activeSessionID: "child-session"
+        )
+
+        try await repository.saveCursor(cursor)
+
+        #expect(try await repository.cursor(for: "file-1") == cursor)
+    }
+
+    @Test
+    func twoSessionsCanBeStoredWithoutAFileOwnershipConstraint() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        let project = ProjectIdentity(key: "/synthetic", displayName: "synthetic", fullPath: "/synthetic")
+
+        try await repository.upsertSession(
+            SessionMetadata(sessionID: "parent", startedAt: .distantPast, workingDirectory: "/synthetic"),
+            project: project
+        )
+        try await repository.upsertSession(
+            SessionMetadata(sessionID: "child", startedAt: .distantPast, workingDirectory: "/synthetic"),
+            project: project
+        )
+
+        #expect(try sessionIDs(at: databaseURL) == ["child", "parent"])
+    }
+
+    @Test
     func duplicateEventIDIsCountedOnce() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }
@@ -23,7 +80,6 @@ struct UsageRepositoryTests {
                 startedAt: Date(timeIntervalSince1970: 100),
                 workingDirectory: project.fullPath
             ),
-            fileKey: "file-1",
             project: project
         )
         let usage = TokenUsage(
@@ -74,6 +130,43 @@ struct UsageRepositoryTests {
     }
 
     @Test
+    func legacySessionLookupKeepsPersistedActiveSessionAcrossRepositoryReopen() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        let project = ProjectIdentity(key: "unknown", displayName: "未知项目", fullPath: nil)
+        let firstRepository = try UsageRepository(url: databaseURL)
+        try await firstRepository.migrate()
+        try await firstRepository.upsertSession(
+            SessionMetadata(
+                sessionID: "persisted-session",
+                startedAt: Date(timeIntervalSince1970: 100),
+                workingDirectory: nil
+            ),
+            fileKey: "file-1",
+            project: project
+        )
+        try await firstRepository.saveCursor(FileCursor(
+            fileKey: "file-1",
+            path: "/synthetic/session.jsonl",
+            offset: 10,
+            modifiedAt: Date(timeIntervalSince1970: 100)
+        ))
+
+        let reopenedRepository = try UsageRepository(url: databaseURL)
+        try await reopenedRepository.migrate()
+        #expect(try await reopenedRepository.sessionID(forFileKey: "file-1") == "persisted-session")
+
+        try await reopenedRepository.saveCursor(FileCursor(
+            fileKey: "file-1",
+            path: "/synthetic/session.jsonl",
+            offset: 20,
+            modifiedAt: Date(timeIntervalSince1970: 200)
+        ))
+
+        #expect(try await reopenedRepository.cursor(for: "file-1")?.activeSessionID == "persisted-session")
+    }
+
+    @Test
     func cumulativeUsageRoundTripsAndKeepsAuthoritativeTotal() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }
@@ -86,7 +179,6 @@ struct UsageRepositoryTests {
                 startedAt: Date(timeIntervalSince1970: 100),
                 workingDirectory: nil
             ),
-            fileKey: "file-1",
             project: project
         )
         let first = TokenUsage(input: 100, cachedInput: 20, output: 30, reasoningOutput: 4, total: 777)
@@ -451,6 +543,128 @@ struct UsageRepositoryTests {
             """,
             handle: handle
         )
+    }
+
+    private func createVersionOneDatabase(at url: URL, receiptKey: String) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create v1 schema fixture")
+        }
+        defer { sqlite3_close(handle) }
+        try executeRawSQL(
+            """
+            CREATE TABLE sessions (
+              id TEXT PRIMARY KEY,
+              file_key TEXT NOT NULL UNIQUE,
+              started_at REAL NOT NULL,
+              project_key TEXT NOT NULL,
+              project_name TEXT NOT NULL,
+              full_path TEXT
+            );
+            CREATE TABLE usage_events (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              occurred_at REAL NOT NULL,
+              input_tokens INTEGER NOT NULL,
+              cached_input_tokens INTEGER NOT NULL,
+              output_tokens INTEGER NOT NULL,
+              reasoning_output_tokens INTEGER NOT NULL,
+              total_tokens INTEGER NOT NULL
+            );
+            CREATE TABLE file_cursors (
+              file_key TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              byte_offset INTEGER NOT NULL,
+              modified_at REAL NOT NULL
+            );
+            CREATE TABLE cumulative_usage (
+              session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+              input_tokens INTEGER NOT NULL,
+              cached_input_tokens INTEGER NOT NULL,
+              output_tokens INTEGER NOT NULL,
+              reasoning_output_tokens INTEGER NOT NULL,
+              total_tokens INTEGER NOT NULL
+            );
+            CREATE TABLE rate_limits (
+              window_key TEXT PRIMARY KEY,
+              limit_id TEXT NOT NULL,
+              window_minutes INTEGER NOT NULL,
+              window_label TEXT,
+              used_percent REAL NOT NULL,
+              resets_at REAL NOT NULL,
+              observed_at REAL NOT NULL
+            );
+            CREATE TABLE notification_receipts (
+              receipt_key TEXT PRIMARY KEY,
+              sent_at REAL NOT NULL
+            );
+            INSERT INTO notification_receipts (receipt_key, sent_at)
+            VALUES ('\(receiptKey)', 1000);
+            PRAGMA user_version = 1;
+            """,
+            handle: handle
+        )
+    }
+
+    private func userVersion(at url: URL) throws -> Int {
+        try queryRawInteger("PRAGMA user_version", at: url)
+    }
+
+    private func columnNames(table: String, at url: URL) throws -> [String] {
+        try queryRawStrings("PRAGMA table_info(\(table))", column: 1, at: url)
+    }
+
+    private func sessionIDs(at url: URL) throws -> [String] {
+        try queryRawStrings("SELECT id FROM sessions ORDER BY id", column: 0, at: url)
+    }
+
+    private func queryRawInteger(_ sql: String, at url: URL) throws -> Int {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not inspect database")
+        }
+        defer { sqlite3_close(handle) }
+        return try queryRawInteger(sql, handle: handle)
+    }
+
+    private func queryRawStrings(_ sql: String, column: Int32, at url: URL) throws -> [String] {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not inspect database")
+        }
+        defer { sqlite3_close(handle) }
+
+        var statement: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
+        guard prepareResult == SQLITE_OK, let statement else {
+            throw SQLiteError(code: prepareResult, message: "database inspection prepare failed")
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var values: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let value = sqlite3_column_text(statement, column) else { continue }
+            values.append(String(cString: value))
+        }
+        return values
     }
 
     private func receiptColumnNames(at url: URL) throws -> [String] {

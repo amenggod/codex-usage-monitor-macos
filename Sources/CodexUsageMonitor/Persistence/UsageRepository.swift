@@ -13,6 +13,21 @@ struct FileCursor: Equatable, Sendable {
     let path: String
     let offset: UInt64
     let modifiedAt: Date
+    let activeSessionID: String?
+
+    init(
+        fileKey: String,
+        path: String,
+        offset: UInt64,
+        modifiedAt: Date,
+        activeSessionID: String? = nil
+    ) {
+        self.fileKey = fileKey
+        self.path = path
+        self.offset = offset
+        self.modifiedAt = modifiedAt
+        self.activeSessionID = activeSessionID
+    }
 }
 
 actor UsageRepository {
@@ -22,6 +37,9 @@ actor UsageRepository {
     }
 
     private let database: SQLiteDatabase
+    // Transitional state used only by the legacy SessionScanner entry points below.
+    // Task 3 must remove this bridge when the scanner writes activeSessionID directly.
+    private var legacySessionIDsByFileKey: [String: String] = [:]
 
     init(url: URL) throws {
         database = try SQLiteDatabase(url: url)
@@ -54,88 +72,18 @@ actor UsageRepository {
 
     func migrate() throws {
         let version = try userVersion()
-        guard version == 0 || version == 1 else {
-            try resetIndex(preserveNotificationReceipts: false)
-            try migrate()
-            return
-        }
+        guard version != UsageSchema.currentVersion else { return }
 
-        guard version == 0 else { return }
+        if version == 1 {
+            try resetIndex(preserveNotificationReceipts: true)
+        } else if version != 0 {
+            try resetIndex(preserveNotificationReceipts: false)
+        }
 
         try database.execute("BEGIN IMMEDIATE")
         do {
-            try database.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                  id TEXT PRIMARY KEY,
-                  file_key TEXT NOT NULL UNIQUE,
-                  started_at REAL NOT NULL,
-                  project_key TEXT NOT NULL,
-                  project_name TEXT NOT NULL,
-                  full_path TEXT
-                )
-                """
-            )
-            try database.execute(
-                """
-                CREATE TABLE IF NOT EXISTS usage_events (
-                  id TEXT PRIMARY KEY,
-                  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                  occurred_at REAL NOT NULL,
-                  input_tokens INTEGER NOT NULL,
-                  cached_input_tokens INTEGER NOT NULL,
-                  output_tokens INTEGER NOT NULL,
-                  reasoning_output_tokens INTEGER NOT NULL,
-                  total_tokens INTEGER NOT NULL
-                )
-                """
-            )
-            try database.execute("CREATE INDEX IF NOT EXISTS usage_events_time ON usage_events(occurred_at)")
-            try database.execute("CREATE INDEX IF NOT EXISTS usage_events_session ON usage_events(session_id)")
-            try database.execute(
-                """
-                CREATE TABLE IF NOT EXISTS file_cursors (
-                  file_key TEXT PRIMARY KEY,
-                  path TEXT NOT NULL,
-                  byte_offset INTEGER NOT NULL,
-                  modified_at REAL NOT NULL
-                )
-                """
-            )
-            try database.execute(
-                """
-                CREATE TABLE IF NOT EXISTS cumulative_usage (
-                  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-                  input_tokens INTEGER NOT NULL,
-                  cached_input_tokens INTEGER NOT NULL,
-                  output_tokens INTEGER NOT NULL,
-                  reasoning_output_tokens INTEGER NOT NULL,
-                  total_tokens INTEGER NOT NULL
-                )
-                """
-            )
-            try database.execute(
-                """
-                CREATE TABLE IF NOT EXISTS rate_limits (
-                  window_key TEXT PRIMARY KEY,
-                  limit_id TEXT NOT NULL,
-                  window_minutes INTEGER NOT NULL,
-                  window_label TEXT,
-                  used_percent REAL NOT NULL,
-                  resets_at REAL NOT NULL,
-                  observed_at REAL NOT NULL
-                )
-                """
-            )
-            try database.execute(
-                """
-                CREATE TABLE IF NOT EXISTS notification_receipts (
-                  receipt_key TEXT PRIMARY KEY,
-                  sent_at REAL NOT NULL
-                )
-                """
-            )
-            try database.execute("PRAGMA user_version = 1")
+            try UsageSchema.createVersionTwo(in: database)
+            try database.execute("PRAGMA user_version = \(UsageSchema.currentVersion)")
             try database.execute("COMMIT")
         } catch {
             try? database.execute("ROLLBACK")
@@ -145,15 +93,13 @@ actor UsageRepository {
 
     func upsertSession(
         _ metadata: SessionMetadata,
-        fileKey: String,
         project: ProjectIdentity
     ) throws {
         try database.execute(
             """
-            INSERT INTO sessions (id, file_key, started_at, project_key, project_name, full_path)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO sessions (id, started_at, project_key, project_name, full_path)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-              file_key = excluded.file_key,
               started_at = excluded.started_at,
               project_key = excluded.project_key,
               project_name = excluded.project_name,
@@ -161,7 +107,6 @@ actor UsageRepository {
             """,
             [
                 .text(metadata.sessionID),
-                .text(fileKey),
                 .real(metadata.startedAt.timeIntervalSince1970),
                 .text(project.key),
                 .text(project.displayName),
@@ -170,15 +115,25 @@ actor UsageRepository {
         )
     }
 
+    // Compatibility for the existing SessionScanner only. Task 3 must remove this
+    // overload after the scanner adopts FileCursor.activeSessionID.
+    func upsertSession(
+        _ metadata: SessionMetadata,
+        fileKey: String,
+        project: ProjectIdentity
+    ) throws {
+        try upsertSession(metadata, project: project)
+        legacySessionIDsByFileKey[fileKey] = metadata.sessionID
+    }
+
+    // Compatibility for the existing SessionScanner only. New code reads the
+    // active session from FileCursor; Task 3 must remove this method.
     func sessionID(forFileKey fileKey: String) throws -> String? {
-        var sessionID: String?
-        try database.query(
-            "SELECT id FROM sessions WHERE file_key = ? LIMIT 1",
-            [.text(fileKey)]
-        ) { statement in
-            sessionID = Self.text(from: statement, column: 0)
+        if let activeSessionID = try cursor(for: fileKey)?.activeSessionID {
+            legacySessionIDsByFileKey[fileKey] = activeSessionID
+            return activeSessionID
         }
-        return sessionID
+        return legacySessionIDsByFileKey[fileKey]
     }
 
     func insertUsageEvent(
@@ -190,8 +145,8 @@ actor UsageRepository {
         try database.execute(
             """
             INSERT OR IGNORE INTO usage_events (
-              id, session_id, occurred_at, input_tokens, cached_input_tokens,
-              output_tokens, reasoning_output_tokens, total_tokens
+              id, session_id, occurred_at, delta_input_tokens, delta_cached_input_tokens,
+              delta_output_tokens, delta_reasoning_output_tokens, delta_total_tokens
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
@@ -326,7 +281,7 @@ actor UsageRepository {
         var cursor: FileCursor?
         try database.query(
             """
-            SELECT file_key, path, byte_offset, modified_at
+            SELECT file_key, path, byte_offset, modified_at, active_session_id
             FROM file_cursors
             WHERE file_key = ?
             LIMIT 1
@@ -337,27 +292,31 @@ actor UsageRepository {
                 fileKey: Self.text(from: statement, column: 0),
                 path: Self.text(from: statement, column: 1),
                 offset: UInt64(bitPattern: sqlite3_column_int64(statement, 2)),
-                modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+                modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+                activeSessionID: Self.optionalText(from: statement, column: 4)
             )
         }
         return cursor
     }
 
     func saveCursor(_ cursor: FileCursor) throws {
+        let activeSessionID = cursor.activeSessionID ?? legacySessionIDsByFileKey[cursor.fileKey]
         try database.execute(
             """
-            INSERT INTO file_cursors (file_key, path, byte_offset, modified_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO file_cursors (file_key, path, byte_offset, modified_at, active_session_id)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(file_key) DO UPDATE SET
               path = excluded.path,
               byte_offset = excluded.byte_offset,
-              modified_at = excluded.modified_at
+              modified_at = excluded.modified_at,
+              active_session_id = excluded.active_session_id
             """,
             [
                 .text(cursor.fileKey),
                 .text(cursor.path),
                 .integer(Int64(bitPattern: cursor.offset)),
-                .real(cursor.modifiedAt.timeIntervalSince1970)
+                .real(cursor.modifiedAt.timeIntervalSince1970),
+                activeSessionID.map(SQLiteValue.text) ?? .null
             ]
         )
     }
@@ -388,11 +347,11 @@ actor UsageRepository {
               sessions.project_key,
               sessions.project_name,
               sessions.full_path,
-              SUM(usage_events.input_tokens),
-              SUM(usage_events.cached_input_tokens),
-              SUM(usage_events.output_tokens),
-              SUM(usage_events.reasoning_output_tokens),
-              SUM(usage_events.total_tokens)
+              SUM(usage_events.delta_input_tokens),
+              SUM(usage_events.delta_cached_input_tokens),
+              SUM(usage_events.delta_output_tokens),
+              SUM(usage_events.delta_reasoning_output_tokens),
+              SUM(usage_events.delta_total_tokens)
             FROM usage_events
             JOIN sessions ON sessions.id = usage_events.session_id
             """
