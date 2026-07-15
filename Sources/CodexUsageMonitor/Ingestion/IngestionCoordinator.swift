@@ -22,8 +22,13 @@ actor IngestionCoordinator {
         let modifiedAt: Date
     }
 
+    private struct DiscoveredFile: Sendable {
+        let url: URL
+        let metadata: FileMetadata?
+    }
+
     private struct DiscoveredFiles: Sendable {
-        let files: [(url: URL, metadata: FileMetadata)]
+        let files: [DiscoveredFile]
         let hasMissingRoot: Bool
     }
 
@@ -41,6 +46,11 @@ actor IngestionCoordinator {
     private let debounceDelay: Duration
     private let resetIndexOperation: @Sendable () async throws -> Void
     private let scanFileOperation: @Sendable (URL) async throws -> ScanResult
+    private let fileMetadataOperation: @Sendable (URL) throws -> (
+        fileKey: String,
+        size: UInt64,
+        modifiedAt: Date
+    )?
     private let updateStream: AsyncStream<IngestionUpdate>
     private let updateContinuation: AsyncStream<IngestionUpdate>.Continuation
     private var fileMetadata: [String: FileMetadata] = [:]
@@ -70,7 +80,12 @@ actor IngestionCoordinator {
         recoveryDelay: Duration = .seconds(30),
         debounceDelay: Duration = .milliseconds(300),
         resetIndexOperation: (@Sendable () async throws -> Void)? = nil,
-        scanFileOperation: (@Sendable (URL) async throws -> ScanResult)? = nil
+        scanFileOperation: (@Sendable (URL) async throws -> ScanResult)? = nil,
+        fileMetadataOperation: (@Sendable (URL) throws -> (
+            fileKey: String,
+            size: UInt64,
+            modifiedAt: Date
+        )?)? = nil
     ) {
         self.roots = roots
         self.repository = repository
@@ -84,6 +99,23 @@ actor IngestionCoordinator {
         }
         self.scanFileOperation = scanFileOperation ?? { url in
             try await scanner.scan(url: url)
+        }
+        self.fileMetadataOperation = fileMetadataOperation ?? { url in
+            let keys: Set<URLResourceKey> = [
+                .fileResourceIdentifierKey,
+                .isRegularFileKey,
+                .fileSizeKey,
+                .contentModificationDateKey
+            ]
+            let values = try url.resourceValues(forKeys: keys)
+            guard values.isRegularFile == true else { return nil }
+            return (
+                fileKey: values.fileResourceIdentifier
+                    .map { String(describing: $0) }
+                    ?? url.standardizedFileURL.path,
+                size: UInt64(values.fileSize ?? 0),
+                modifiedAt: values.contentModificationDate ?? .distantPast
+            )
         }
         let pair = AsyncStream<IngestionUpdate>.makeStream(
             bufferingPolicy: .bufferingNewest(20)
@@ -170,6 +202,11 @@ actor IngestionCoordinator {
                 scheduleWatcherRecovery()
             }
             publish(outcome)
+        } catch let error as CancellationError {
+            rebuilding = false
+            pendingRescanDuringRebuild = false
+            updateContinuation.yield(.failed(error.localizedDescription))
+            throw error
         } catch {
             rebuilding = false
             pendingRescanDuringRebuild = false
@@ -261,6 +298,8 @@ actor IngestionCoordinator {
             scheduleRecoveryIfNeeded(outcome)
             guard watcherIsActive, watcher === recoveredWatcher else { return }
             publish(outcome)
+        } catch let error as CancellationError {
+            updateContinuation.yield(.failed(error.localizedDescription))
         } catch {
             updateContinuation.yield(.failed(error.localizedDescription))
             scheduleWatcherRecovery()
@@ -340,16 +379,21 @@ actor IngestionCoordinator {
         for file in discovered.files {
             try validateScan(generation: generation, allowsRebuild: allowsRebuild)
             let path = file.url.path
-            if forceAll || fileMetadata[path] != file.metadata {
+            if let metadata = file.metadata,
+               forceAll || fileMetadata[path] != metadata {
                 do {
                     _ = try await scanFileOperation(file.url)
                     try validateScan(generation: generation, allowsRebuild: allowsRebuild)
-                    fileMetadata[path] = file.metadata
+                    fileMetadata[path] = metadata
                 } catch let error as ScanInvalidated {
+                    throw error
+                } catch let error as CancellationError {
                     throw error
                 } catch {
                     failedPaths.insert(path)
                 }
+            } else if file.metadata == nil {
+                failedPaths.insert(path)
             }
             completedFiles += 1
             if allowsRebuild {
@@ -394,13 +438,7 @@ actor IngestionCoordinator {
 
     private func discoverJSONLFiles() throws -> DiscoveredFiles {
         let fileManager = FileManager.default
-        let keys: Set<URLResourceKey> = [
-            .fileResourceIdentifierKey,
-            .isRegularFileKey,
-            .fileSizeKey,
-            .contentModificationDateKey
-        ]
-        var files: [(url: URL, metadata: FileMetadata)] = []
+        var files: [DiscoveredFile] = []
         var missingRoot = false
 
         for root in roots {
@@ -412,7 +450,12 @@ actor IngestionCoordinator {
             }
             guard let enumerator = fileManager.enumerator(
                 at: root,
-                includingPropertiesForKeys: Array(keys),
+                includingPropertiesForKeys: [
+                    .fileResourceIdentifierKey,
+                    .isRegularFileKey,
+                    .fileSizeKey,
+                    .contentModificationDateKey
+                ],
                 options: [.skipsHiddenFiles]
             ) else {
                 missingRoot = true
@@ -422,16 +465,21 @@ actor IngestionCoordinator {
             for case let enumeratedURL as URL in enumerator {
                 guard enumeratedURL.pathExtension.lowercased() == "jsonl" else { continue }
                 let fileURL = URL(fileURLWithPath: enumeratedURL.path)
-                let values = try fileURL.resourceValues(forKeys: keys)
-                guard values.isRegularFile == true else { continue }
-                let metadata = FileMetadata(
-                    fileKey: values.fileResourceIdentifier
-                        .map { String(describing: $0) }
-                        ?? fileURL.standardizedFileURL.path,
-                    size: UInt64(values.fileSize ?? 0),
-                    modifiedAt: values.contentModificationDate ?? .distantPast
-                )
-                files.append((fileURL, metadata))
+                do {
+                    guard let values = try fileMetadataOperation(fileURL) else { continue }
+                    files.append(DiscoveredFile(
+                        url: fileURL,
+                        metadata: FileMetadata(
+                            fileKey: values.fileKey,
+                            size: values.size,
+                            modifiedAt: values.modifiedAt
+                        )
+                    ))
+                } catch let error as CancellationError {
+                    throw error
+                } catch {
+                    files.append(DiscoveredFile(url: fileURL, metadata: nil))
+                }
             }
         }
 
@@ -488,6 +536,8 @@ actor IngestionCoordinator {
                 scheduleWatcherRecovery()
             }
             publish(outcome)
+        } catch let error as CancellationError {
+            updateContinuation.yield(.failed(error.localizedDescription))
         } catch {
             updateContinuation.yield(.failed(error.localizedDescription))
             scheduleRebuildRecovery()
