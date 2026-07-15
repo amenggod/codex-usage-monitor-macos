@@ -210,7 +210,7 @@ actor UsageRepository {
 
                 guard inserted else { continue }
                 insertedEvents += 1
-                if event.lastUsage == nil, event.cumulativeUsage != nil {
+                if event.cumulativeUsage != nil {
                     cumulativeSessions.insert(event.sessionID)
                 }
             }

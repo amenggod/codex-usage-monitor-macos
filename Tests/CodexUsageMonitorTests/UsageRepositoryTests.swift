@@ -11,9 +11,11 @@ struct UsageRepositoryTests {
         defer { fixture.remove() }
         let event = fixture.event(sessionID: "parent", second: 1, lastTotal: 25, cumulativeTotal: 25)
 
-        _ = try await fixture.repository.apply(fixture.batch(fileKey: "file-a", events: [event]))
-        _ = try await fixture.repository.apply(fixture.batch(fileKey: "file-b", events: [event]))
+        let first = try await fixture.repository.apply(fixture.batch(fileKey: "file-a", events: [event]))
+        let duplicate = try await fixture.repository.apply(fixture.batch(fileKey: "file-b", events: [event]))
 
+        #expect(first == FileIngestionResult(insertedEvents: 1, duplicateEvents: 0))
+        #expect(duplicate == FileIngestionResult(insertedEvents: 0, duplicateEvents: 1))
         #expect(try await fixture.total() == 25)
     }
 
@@ -28,6 +30,59 @@ struct UsageRepositoryTests {
         _ = try await fixture.repository.apply(fixture.batch(fileKey: "earlier", events: [earlier]))
 
         #expect(try await fixture.total() == 30)
+    }
+
+    @Test
+    func mixedUsageEventRecomputesLaterCumulativeOnlyEventWhenArrivingOutOfOrder() async throws {
+        let fixture = try await RepositoryBatchFixture()
+        defer { fixture.remove() }
+        let later = fixture.cumulativeOnlyEvent(sessionID: "s", second: 2, cumulativeTotal: 30)
+        let earlier = fixture.event(sessionID: "s", second: 1, lastTotal: 10, cumulativeTotal: 10)
+
+        _ = try await fixture.repository.apply(fixture.batch(fileKey: "later", events: [later]))
+        _ = try await fixture.repository.apply(fixture.batch(fileKey: "earlier", events: [earlier]))
+
+        #expect(try await fixture.total() == 30)
+    }
+
+    @Test
+    func failedBatchRollsBackAllWrites() async throws {
+        let fixture = try await RepositoryBatchFixture()
+        defer { fixture.remove() }
+        let event = fixture.event(sessionID: "s", second: 1, lastTotal: 25, cumulativeTotal: 25)
+        let base = fixture.batch(fileKey: "failed-file", events: [event])
+        let validLimit = RateLimitObservation(
+            limitID: "valid",
+            window: .fiveHours,
+            usedPercent: 20,
+            resetsAt: Date(timeIntervalSince1970: 2_000),
+            observedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let invalidLimit = RateLimitObservation(
+            limitID: "invalid",
+            window: .week,
+            usedPercent: .nan,
+            resetsAt: Date(timeIntervalSince1970: 2_000),
+            observedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let batch = FileIngestionBatch(
+            sessions: base.sessions,
+            events: base.events,
+            limits: [validLimit, invalidLimit],
+            cursor: base.cursor
+        )
+
+        do {
+            _ = try await fixture.repository.apply(batch)
+            Issue.record("expected the invalid limit to fail its SQLite constraint")
+        } catch let error as SQLiteError {
+            #expect(error.code == SQLITE_CONSTRAINT)
+        }
+
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM sessions", at: fixture.databaseURL) == 0)
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM usage_events", at: fixture.databaseURL) == 0)
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM rate_limits", at: fixture.databaseURL) == 0)
+        #expect(try await fixture.repository.cursor(for: "failed-file") == nil)
     }
 
     @Test
