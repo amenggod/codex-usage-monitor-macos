@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import CodexUsageMonitor
 
@@ -86,7 +87,7 @@ struct EndToEndIngestionTests {
 
     @Test
     func branchedHistoryIsDeduplicatedAndAppendUpdatesWithinTwoSeconds() async throws {
-        let fixture = try EndToEndFixture()
+        let fixture = try EndToEndFixture(seedVersionOneDatabase: true)
         defer { fixture.remove() }
         let parentSession = fixture.sessionLine(
             sessionID: "parent-session",
@@ -124,7 +125,22 @@ struct EndToEndIngestionTests {
             ]
         )
 
+        let recorder = EndToEndUpdateRecorder()
+        await recorder.observe(await fixture.coordinator.updates())
+        defer { Task { await recorder.stop() } }
         await fixture.coordinator.start()
+        #expect(await recorder.waitForCount(1))
+        #expect(await recorder.value(at: 0) == .completed)
+        #expect(try fixture.userVersion() == 2)
+        #expect(try await fixture.repository.notificationWasSent(EndToEndFixture.migratedReceiptKey))
+
+        try await fixture.coordinator.rebuildIndex()
+        #expect(await recorder.waitForCount(5))
+        #expect(await recorder.value(at: 1) == .rebuilding(completed: 0, total: 2))
+        #expect(await recorder.value(at: 2) == .rebuilding(completed: 1, total: 2))
+        #expect(await recorder.value(at: 3) == .rebuilding(completed: 2, total: 2))
+        #expect(await recorder.value(at: 4) == .completed)
+
         let initial = try await fixture.snapshot()
 
         #expect(initial.total.total == 30)
@@ -260,16 +276,53 @@ struct EndToEndIngestionTests {
     }
 }
 
+private actor EndToEndUpdateRecorder {
+    private var values: [IngestionUpdate] = []
+    private var observationTask: Task<Void, Never>?
+
+    func observe(_ stream: AsyncStream<IngestionUpdate>) {
+        observationTask = Task { [weak self] in
+            for await value in stream {
+                await self?.record(value)
+            }
+        }
+    }
+
+    func waitForCount(_ expected: Int, attempts: Int = 60) async -> Bool {
+        for _ in 0..<attempts {
+            if values.count >= expected { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return values.count >= expected
+    }
+
+    func value(at index: Int) -> IngestionUpdate? {
+        values.indices.contains(index) ? values[index] : nil
+    }
+
+    func stop() {
+        observationTask?.cancel()
+        observationTask = nil
+    }
+
+    private func record(_ value: IngestionUpdate) {
+        values.append(value)
+    }
+}
+
 private final class EndToEndFixture: @unchecked Sendable {
+    static let migratedReceiptKey = "synthetic-week|1784701200|20"
+
     let directoryURL: URL
     let codexHome: URL
     let sessionsRoot: URL
     let archivedRoot: URL
+    let databaseURL: URL
     let repository: UsageRepository
     let coordinator: IngestionCoordinator
     let now = Date(timeIntervalSince1970: 1_784_089_200)
 
-    init(createArchivedRoot: Bool = true) throws {
+    init(createArchivedRoot: Bool = true, seedVersionOneDatabase: Bool = false) throws {
         directoryURL = FileManager.default.temporaryDirectory
             .appending(path: "EndToEndIngestionTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         codexHome = directoryURL.appending(path: "CODEX_HOME", directoryHint: .isDirectory)
@@ -280,7 +333,11 @@ private final class EndToEndFixture: @unchecked Sendable {
         if createArchivedRoot {
             try FileManager.default.createDirectory(at: archivedRoot, withIntermediateDirectories: true)
         }
-        repository = try UsageRepository(url: directoryURL.appending(path: "index.sqlite"))
+        databaseURL = directoryURL.appending(path: "index.sqlite")
+        if seedVersionOneDatabase {
+            try Self.createVersionOneDatabase(at: databaseURL)
+        }
+        repository = try UsageRepository(url: databaseURL)
         let scanner = SessionScanner(repository: repository)
         let watcher = SessionFileWatcher(roots: roots)
         coordinator = IngestionCoordinator(
@@ -319,6 +376,31 @@ private final class EndToEndFixture: @unchecked Sendable {
             try await Task.sleep(for: .milliseconds(20))
         } while clock.now < deadline
         return try await snapshot(range: .all).total.total == expected
+    }
+
+    func userVersion() throws -> Int {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            databaseURL.path,
+            &handle,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not inspect synthetic database")
+        }
+        defer { sqlite3_close(handle) }
+
+        var statement: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(handle, "PRAGMA user_version", -1, &statement, nil)
+        guard prepareResult == SQLITE_OK, let statement else {
+            throw SQLiteError(code: prepareResult, message: "could not inspect synthetic schema version")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw SQLiteError(code: sqlite3_errcode(handle), message: "synthetic schema version missing")
+        }
+        return Int(sqlite3_column_int64(statement, 0))
     }
 
     @discardableResult
@@ -406,6 +488,54 @@ private final class EndToEndFixture: @unchecked Sendable {
         """
         {"input_tokens":\(usage.input),"cached_input_tokens":\(usage.cachedInput),"output_tokens":\(usage.output),"reasoning_output_tokens":\(usage.reasoningOutput),"total_tokens":\(usage.total)}
         """
+    }
+
+    private static func createVersionOneDatabase(at url: URL) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create synthetic v1 database")
+        }
+        defer { sqlite3_close(handle) }
+
+        let sql =
+            """
+            CREATE TABLE sessions (
+              id TEXT PRIMARY KEY,
+              file_key TEXT NOT NULL UNIQUE,
+              started_at REAL NOT NULL,
+              project_key TEXT NOT NULL,
+              project_name TEXT NOT NULL,
+              full_path TEXT
+            );
+            CREATE TABLE notification_receipts (
+              receipt_key TEXT PRIMARY KEY,
+              sent_at REAL NOT NULL
+            );
+            INSERT INTO sessions (
+              id, file_key, started_at, project_key, project_name, full_path
+            ) VALUES (
+              'synthetic-legacy-session', 'synthetic-legacy-file', 1000,
+              '/synthetic/projects/legacy', 'legacy', '/synthetic/projects/legacy'
+            );
+            INSERT INTO notification_receipts (receipt_key, sent_at)
+            VALUES ('\(migratedReceiptKey)', 1000);
+            PRAGMA user_version = 1;
+            """
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        let result = sqlite3_exec(handle, sql, nil, nil, &errorMessage)
+        defer { sqlite3_free(errorMessage) }
+        guard result == SQLITE_OK else {
+            throw SQLiteError(
+                code: result,
+                message: errorMessage.map { String(cString: $0) } ?? "synthetic v1 SQL failed"
+            )
+        }
     }
 
     func remove() {
