@@ -146,7 +146,7 @@ struct SettingsView: View {
         )
     }
 
-    private var displayModeBinding: Binding<DisplayMode> {
+    var displayModeBinding: Binding<DisplayMode> {
         Binding(
             get: { displayModeStore.mode },
             set: { displayModeStore.setMode($0) }

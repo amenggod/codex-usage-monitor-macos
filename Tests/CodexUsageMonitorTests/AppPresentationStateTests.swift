@@ -35,6 +35,29 @@ struct AppPresentationStateTests {
     }
 
     @MainActor
+    @Test func settingsDisplayModeBindingUpdatesInjectedStoreAndPersists() throws {
+        let suiteName = "DisplayModeTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = DisplayModeStore(defaults: defaults)
+        let settings = SettingsView(
+            model: LiveDependencies.makeFailureViewModel(
+                error: PresentationTestFailure(message: "unused")
+            ),
+            launchAtLogin: LaunchAtLoginServiceSpy(enabled: false),
+            notificationSender: PresentationNotificationSenderSpy(enabled: false),
+            displayModeStore: store
+        )
+
+        let binding = settings.displayModeBinding
+        #expect(binding.wrappedValue == .desktop)
+        binding.wrappedValue = .both
+
+        #expect(store.mode == .both)
+        #expect(DisplayModeStore(defaults: defaults).mode == .both)
+    }
+
+    @MainActor
     @Test func appRuntimeLaunchStartsMonitoringOnceWithoutPopover() async {
         let starter = RuntimeStarterSpy()
         let runtime = AppRuntime(starter: starter)
