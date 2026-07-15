@@ -8,7 +8,8 @@ extension WidgetUsageSnapshot {
         generatedAt: Date = Date(timeIntervalSince1970: 1_000),
         todayTokens: Int64 = 12_345,
         fiveHourLimit: WidgetLimitStatus? = nil,
-        weekLimit: WidgetLimitStatus? = .fixture()
+        weekLimit: WidgetLimitStatus? = .fixture(),
+        state: WidgetDataState? = nil
     ) -> Self {
         Self(
             generatedAt: generatedAt,
@@ -21,8 +22,50 @@ extension WidgetUsageSnapshot {
                 WidgetProjectUsage(id: "two", name: "monitor", tokens: 31_400),
                 WidgetProjectUsage(id: "three", name: "notes", tokens: 25_265),
             ],
-            state: .fresh(lastSuccessfulAt: generatedAt)
+            state: state ?? .fresh(lastSuccessfulAt: generatedAt)
         )
+    }
+
+    static var privacyFixtures: [Self] {
+        let generatedAt = Date(timeIntervalSince1970: 1_000)
+        return [
+            fixture(
+                generatedAt: generatedAt,
+                fiveHourLimit: .fixture(),
+                weekLimit: .fixture(),
+                state: .fresh(lastSuccessfulAt: generatedAt)
+            ),
+            fixture(
+                generatedAt: generatedAt,
+                fiveHourLimit: nil,
+                weekLimit: .fixture(),
+                state: .partial(lastSuccessfulAt: generatedAt, failedFiles: 2)
+            ),
+            fixture(
+                generatedAt: generatedAt,
+                fiveHourLimit: .fixture(),
+                weekLimit: nil,
+                state: .rebuilding(lastSuccessfulAt: nil)
+            ),
+            fixture(
+                generatedAt: generatedAt,
+                fiveHourLimit: nil,
+                weekLimit: nil,
+                state: .stale(lastSuccessfulAt: generatedAt)
+            ),
+            fixture(
+                generatedAt: generatedAt,
+                fiveHourLimit: .fixture(),
+                weekLimit: .fixture(),
+                state: .noData
+            ),
+            fixture(
+                generatedAt: generatedAt,
+                fiveHourLimit: nil,
+                weekLimit: nil,
+                state: .failed
+            ),
+        ]
     }
 }
 

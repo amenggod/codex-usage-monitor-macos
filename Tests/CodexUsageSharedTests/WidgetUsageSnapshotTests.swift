@@ -4,18 +4,20 @@ import Testing
 
 @Suite("WidgetUsageSnapshotTests")
 struct WidgetUsageSnapshotTests {
-    @Test func storedSnapshotMatchesTheDisplaySafeJSONWhitelist() throws {
+    @Test(arguments: WidgetUsageSnapshot.privacyFixtures)
+    func storedSnapshotMatchesTheDisplaySafeJSONWhitelist(
+        snapshot: WidgetUsageSnapshot
+    ) throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let store = try WidgetSnapshotStore(directoryURL: directory)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let snapshot = WidgetUsageSnapshot.fixture(fiveHourLimit: .fixture())
 
         try store.write(snapshot)
         let data = try Data(contentsOf: store.fileURL)
         let object = try JSONSerialization.jsonObject(with: data)
 
-        try assertWidgetSnapshotJSONUsesPrivacyWhitelist(object)
+        try assertWidgetSnapshotJSONUsesPrivacyWhitelist(object, matching: snapshot)
         #expect(try JSONDecoder.widgetSnapshot.decode(WidgetUsageSnapshot.self, from: data) == snapshot)
     }
 
@@ -60,50 +62,70 @@ struct WidgetUsageSnapshotTests {
 }
 
 private enum WidgetSnapshotJSONNode {
-    case root
+    case root(WidgetUsageSnapshot)
     case limit
     case projects
     case project
-    case state
-    case statePayload(String)
+    case state(WidgetDataState)
+    case statePayload(WidgetDataState)
 }
 
 private func assertWidgetSnapshotJSONUsesPrivacyWhitelist(
     _ value: Any,
-    node: WidgetSnapshotJSONNode = .root
+    matching snapshot: WidgetUsageSnapshot
+) throws {
+    try assertWidgetSnapshotJSONUsesPrivacyWhitelist(value, node: .root(snapshot))
+}
+
+private func assertWidgetSnapshotJSONUsesPrivacyWhitelist(
+    _ value: Any,
+    node: WidgetSnapshotJSONNode
 ) throws {
     switch node {
-    case .root:
+    case let .root(snapshot):
         let object = try #require(value as? [String: Any])
-        #expect(Set(object.keys) == [
+        var expectedKeys: Set<String> = [
             "schemaVersion",
             "generatedAt",
             "todayTokens",
             "allTimeTokens",
-            "fiveHourLimit",
-            "weekLimit",
             "projects",
             "state",
-        ])
+        ]
+        if snapshot.fiveHourLimit != nil {
+            expectedKeys.insert("fiveHourLimit")
+        }
+        if snapshot.weekLimit != nil {
+            expectedKeys.insert("weekLimit")
+        }
+        #expect(Set(object.keys) == expectedKeys)
         try assertJSONScalar(try #require(object["schemaVersion"]))
         try assertJSONScalar(try #require(object["generatedAt"]))
         try assertJSONScalar(try #require(object["todayTokens"]))
         try assertJSONScalar(try #require(object["allTimeTokens"]))
-        try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
-            try #require(object["fiveHourLimit"]),
-            node: .limit
-        )
-        try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
-            try #require(object["weekLimit"]),
-            node: .limit
-        )
+        if snapshot.fiveHourLimit != nil {
+            try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
+                try #require(object["fiveHourLimit"]),
+                node: .limit
+            )
+        } else {
+            #expect(object["fiveHourLimit"] == nil)
+        }
+        if snapshot.weekLimit != nil {
+            try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
+                try #require(object["weekLimit"]),
+                node: .limit
+            )
+        } else {
+            #expect(object["weekLimit"] == nil)
+        }
         try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
             try #require(object["projects"]),
             node: .projects
         )
         try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
             try #require(object["state"]),
-            node: .state
+            node: .state(snapshot.state)
         )
 
     case .limit:
@@ -126,50 +148,50 @@ private func assertWidgetSnapshotJSONUsesPrivacyWhitelist(
             try assertJSONScalar(try #require(object[key]))
         }
 
-    case .state:
+    case let .state(expectedState):
         let object = try #require(value as? [String: Any])
-        let allowedCases: Set<String> = [
-            "fresh",
-            "partial",
-            "rebuilding",
-            "stale",
-            "noData",
-            "failed",
-        ]
-        #expect(object.count == 1)
-        let stateCase = try #require(object.keys.first)
-        #expect(allowedCases.contains(stateCase))
+        let stateCase: String
+        switch expectedState {
+        case .fresh:
+            stateCase = "fresh"
+        case .partial:
+            stateCase = "partial"
+        case .rebuilding:
+            stateCase = "rebuilding"
+        case .stale:
+            stateCase = "stale"
+        case .noData:
+            stateCase = "noData"
+        case .failed:
+            stateCase = "failed"
+        }
+        #expect(Set(object.keys) == [stateCase])
         try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
             try #require(object[stateCase]),
-            node: .statePayload(stateCase)
+            node: .statePayload(expectedState)
         )
 
-    case let .statePayload(stateCase):
+    case let .statePayload(expectedState):
         let object = try #require(value as? [String: Any])
         let allowedKeys: Set<String>
-        switch stateCase {
-        case "fresh", "stale":
+        switch expectedState {
+        case .fresh, .stale:
             allowedKeys = ["lastSuccessfulAt"]
-        case "partial":
+        case .partial:
             allowedKeys = ["lastSuccessfulAt", "failedFiles"]
-        case "rebuilding":
-            allowedKeys = ["lastSuccessfulAt"]
-        case "noData", "failed":
-            allowedKeys = []
-        default:
+        case let .rebuilding(lastSuccessfulAt):
+            allowedKeys = lastSuccessfulAt == nil ? [] : ["lastSuccessfulAt"]
+        case .noData, .failed:
             allowedKeys = []
         }
         #expect(Set(object.keys) == allowedKeys)
         for key in object.keys {
-            try assertJSONScalar(try #require(object[key]), allowingNull: stateCase == "rebuilding")
+            try assertJSONScalar(try #require(object[key]))
         }
     }
 }
 
-private func assertJSONScalar(_ value: Any, allowingNull: Bool = false) throws {
-    if allowingNull, value is NSNull {
-        return
-    }
+private func assertJSONScalar(_ value: Any) throws {
     #expect(!(value is [String: Any]))
     #expect(!(value is [Any]))
 }
