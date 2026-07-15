@@ -6,7 +6,7 @@
 
 **Architecture:** The main app remains the only process that scans Codex logs, owns SQLite, computes usage, and sends notifications. It projects a privacy-safe `WidgetUsageSnapshot` into an App Group container and requests a WidgetKit reload only when visible fields change. A Widget Extension reads that snapshot and renders `systemSmall` and `systemMedium`; a signed login-item helper starts the main app with `--background`, while user-initiated launches and the widget deep link open a singleton SwiftUI-hosted dashboard window.
 
-**Tech Stack:** Swift 6, SwiftUI, AppKit, WidgetKit, ServiceManagement, Foundation App Groups, Swift Testing, Swift Package Manager, XcodeGen, Xcode 26.3, GitHub Actions.
+**Tech Stack:** Swift 6, SwiftUI, AppKit, WidgetKit, ServiceManagement, Foundation App Groups, Swift Testing, Swift Package Manager, XcodeGen, current stable Xcode (26.6 at implementation time), GitHub Actions.
 
 ## Global Constraints
 
@@ -1579,7 +1579,7 @@ command -v xcodegen >/dev/null || { echo "xcodegen is required" >&2; exit 1; }
 xcodegen generate --spec project.yml
 ```
 
-Install full Xcode 26.3 or later from the Mac App Store, then run:
+Install the current stable Xcode from the Mac App Store, then run:
 
 ```bash
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -1927,8 +1927,8 @@ For signed builds, pass `DEVELOPMENT_TEAM`, `CODE_SIGN_STYLE=Automatic`, and `CO
 CI sequence:
 
 ```yaml
-- name: Select Xcode 26.3
-  run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+- name: Select Xcode
+  run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 - name: Install XcodeGen
   run: brew install xcodegen
 - name: Verify generated project is current
@@ -2060,7 +2060,7 @@ Expected: all ten runs pass.
 Run with full Xcode selected:
 
 ```bash
-sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 bash Scripts/generate-project.sh
 CODE_SIGNING_ALLOWED=NO bash Scripts/build-app.sh
 bash Scripts/verify-bundle.sh "dist/Codex Usage Monitor.app"
