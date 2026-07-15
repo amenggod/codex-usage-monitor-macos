@@ -9,9 +9,14 @@ protocol DashboardPresenting: AnyObject {
 @MainActor
 final class DashboardWindowController: NSWindowController, DashboardPresenting {
     private let model: UsageViewModel
+    let launchAtLogin: any LaunchAtLoginServicing
 
-    init(model: UsageViewModel) {
+    init(
+        model: UsageViewModel,
+        launchAtLogin: any LaunchAtLoginServicing
+    ) {
         self.model = model
+        self.launchAtLogin = launchAtLogin
         super.init(window: nil)
     }
 
@@ -29,7 +34,10 @@ final class DashboardWindowController: NSWindowController, DashboardPresenting {
                 defer: false
             )
             window.title = "Codex Usage Monitor"
-            window.contentView = NSHostingView(rootView: UsagePopoverView(model: model))
+            window.contentView = NSHostingView(rootView: UsagePopoverView(
+                model: model,
+                launchAtLogin: launchAtLogin
+            ))
             window.center()
             window.isReleasedWhenClosed = false
             self.window = window

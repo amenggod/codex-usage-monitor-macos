@@ -1,9 +1,10 @@
 import Foundation
 import ServiceManagement
 
-protocol LaunchAtLoginServicing: Sendable {
+protocol LaunchAtLoginServicing: AnyObject, Sendable {
     var isEnabled: Bool { get }
     var lastErrorDescription: String? { get }
+    var hasMigrationError: Bool { get }
     func setEnabled(_ enabled: Bool) throws
     func migrateLegacyRegistrationIfNeeded() throws
 }
@@ -13,6 +14,24 @@ enum LaunchAtLoginRegistrationStatus: Sendable {
     case enabled
     case requiresApproval
     case notFound
+    case unknown
+}
+
+enum LaunchAtLoginMigrationError: LocalizedError, Sendable {
+    case unknownRegistrationStatus
+    case helperDidNotBecomeEnabled
+    case rollbackFailed(migration: String, rollback: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unknownRegistrationStatus:
+            "登录项返回未知状态，已保留原设置并将在下次重试"
+        case .helperDidNotBecomeEnabled:
+            "新的登录项未能启用，已保留旧登录项"
+        case let .rollbackFailed(migration, rollback):
+            "登录项迁移失败：\(migration)；回滚新登录项失败：\(rollback)"
+        }
+    }
 }
 
 protocol LaunchAtLoginServiceAdapting: Sendable {
@@ -21,7 +40,7 @@ protocol LaunchAtLoginServiceAdapting: Sendable {
     func unregister() throws
 }
 
-struct LaunchAtLoginController: LaunchAtLoginServicing, Sendable {
+final class LaunchAtLoginController: LaunchAtLoginServicing, Sendable {
     private let adapter: any LaunchAtLoginServiceAdapting
     private let legacyAdapter: any LaunchAtLoginServiceAdapting
     private let migrationStore: LaunchAtLoginMigrationStore
@@ -44,6 +63,10 @@ struct LaunchAtLoginController: LaunchAtLoginServicing, Sendable {
         migrationStore.lastErrorDescription
     }
 
+    var hasMigrationError: Bool {
+        migrationStore.hasMigrationError
+    }
+
     func setEnabled(_ enabled: Bool) throws {
         do {
             if enabled {
@@ -51,9 +74,12 @@ struct LaunchAtLoginController: LaunchAtLoginServicing, Sendable {
             } else {
                 try adapter.unregister()
             }
-            migrationStore.setLastErrorDescription(nil)
+            migrationStore.setLastErrorDescription(nil, isMigrationError: false)
         } catch {
-            migrationStore.setLastErrorDescription(error.localizedDescription)
+            migrationStore.setLastErrorDescription(
+                error.localizedDescription,
+                isMigrationError: false
+            )
             throw error
         }
     }
@@ -61,24 +87,88 @@ struct LaunchAtLoginController: LaunchAtLoginServicing, Sendable {
     func migrateLegacyRegistrationIfNeeded() throws {
         do {
             guard !migrationStore.didMigrate else {
-                migrationStore.setLastErrorDescription(nil)
+                migrationStore.setLastErrorDescription(nil, isMigrationError: false)
                 return
             }
             switch legacyAdapter.registrationStatus {
             case .notRegistered, .notFound:
                 break
-            case .enabled, .requiresApproval:
-                do {
-                    try legacyAdapter.unregister()
-                } catch where isServiceManagementJobNotFound(error) {
-                    break
-                }
+            case .enabled:
+                try migrateEnabledLegacyRegistration()
+            case .requiresApproval:
+                try migrateDeclinedLegacyRegistration()
+            case .unknown:
+                throw LaunchAtLoginMigrationError.unknownRegistrationStatus
             }
             migrationStore.markMigrated()
-            migrationStore.setLastErrorDescription(nil)
+            migrationStore.setLastErrorDescription(nil, isMigrationError: false)
         } catch {
-            migrationStore.setLastErrorDescription(error.localizedDescription)
+            migrationStore.setLastErrorDescription(
+                error.localizedDescription,
+                isMigrationError: true
+            )
             throw error
+        }
+    }
+
+    private func migrateEnabledLegacyRegistration() throws {
+        let helperWasNewlyRegistered: Bool
+        switch adapter.registrationStatus {
+        case .enabled:
+            helperWasNewlyRegistered = false
+        case .notRegistered, .notFound:
+            try adapter.register()
+            helperWasNewlyRegistered = true
+            guard adapter.registrationStatus == .enabled else {
+                let migrationError = LaunchAtLoginMigrationError.helperDidNotBecomeEnabled
+                try rollbackNewHelper(after: migrationError)
+                throw migrationError
+            }
+        case .requiresApproval:
+            throw LaunchAtLoginMigrationError.helperDidNotBecomeEnabled
+        case .unknown:
+            throw LaunchAtLoginMigrationError.unknownRegistrationStatus
+        }
+
+        do {
+            try legacyAdapter.unregister()
+        } catch where isServiceManagementJobNotFound(error) {
+            return
+        } catch {
+            if helperWasNewlyRegistered {
+                try rollbackNewHelper(after: error)
+            }
+            throw error
+        }
+    }
+
+    private func migrateDeclinedLegacyRegistration() throws {
+        switch adapter.registrationStatus {
+        case .enabled, .requiresApproval:
+            do {
+                try adapter.unregister()
+            } catch where isServiceManagementJobNotFound(error) {}
+        case .notRegistered, .notFound:
+            break
+        case .unknown:
+            throw LaunchAtLoginMigrationError.unknownRegistrationStatus
+        }
+
+        do {
+            try legacyAdapter.unregister()
+        } catch where isServiceManagementJobNotFound(error) {}
+    }
+
+    private func rollbackNewHelper(after migrationError: any Error) throws {
+        do {
+            try adapter.unregister()
+        } catch where isServiceManagementJobNotFound(error) {
+            return
+        } catch {
+            throw LaunchAtLoginMigrationError.rollbackFailed(
+                migration: migrationError.localizedDescription,
+                rollback: error.localizedDescription
+            )
         }
     }
 }
@@ -97,6 +187,7 @@ private final class LaunchAtLoginMigrationStore: @unchecked Sendable {
     private let defaults: UserDefaults
     private let lock = NSLock()
     private var storedLastErrorDescription: String?
+    private var storedHasMigrationError = false
 
     init(defaults: UserDefaults) {
         self.defaults = defaults
@@ -114,9 +205,17 @@ private final class LaunchAtLoginMigrationStore: @unchecked Sendable {
         lock.withLock { storedLastErrorDescription }
     }
 
-    func setLastErrorDescription(_ description: String?) {
+    var hasMigrationError: Bool {
+        lock.withLock { storedHasMigrationError }
+    }
+
+    func setLastErrorDescription(
+        _ description: String?,
+        isMigrationError: Bool
+    ) {
         lock.withLock {
             storedLastErrorDescription = description
+            storedHasMigrationError = description != nil && isMigrationError
         }
     }
 }
@@ -167,7 +266,7 @@ private extension LaunchAtLoginRegistrationStatus {
         case .notFound:
             self = .notFound
         @unknown default:
-            self = .notFound
+            self = .unknown
         }
     }
 }

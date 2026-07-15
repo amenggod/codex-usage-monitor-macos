@@ -111,6 +111,33 @@ struct AppPresentationStateTests {
     }
 
     @MainActor
+    @Test func displayEntryPointsShareOneLaunchAtLoginService() {
+        let model = LiveDependencies.makeFailureViewModel(
+            error: PresentationTestFailure(message: "unused")
+        )
+        let launchAtLogin = LaunchAtLoginServiceSpy(enabled: false)
+        let dashboard = DashboardWindowController(
+            model: model,
+            launchAtLogin: launchAtLogin
+        )
+        let popover = UsagePopoverView(
+            model: model,
+            launchAtLogin: launchAtLogin,
+            dashboard: dashboard
+        )
+        let settings = SettingsView(
+            model: model,
+            launchAtLogin: launchAtLogin,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false),
+            menuBarVisibilityStore: MenuBarVisibilityStore()
+        )
+
+        #expect(dashboard.launchAtLogin === launchAtLogin)
+        #expect(popover.launchAtLogin === launchAtLogin)
+        #expect(settings.launchAtLogin === launchAtLogin)
+    }
+
+    @MainActor
     @Test func appRuntimeLaunchStartsMonitoringOnceWithoutPopover() async {
         let starter = RuntimeStarterSpy()
         let runtime = AppRuntime(starter: starter)
@@ -133,6 +160,7 @@ struct AppPresentationStateTests {
 
         #expect(!state.isLaunchAtLoginEnabled)
         #expect(state.launchAtLoginError == "无法启用")
+        #expect(!state.canRetryLaunchAtLoginMigration)
         #expect(!service.isEnabled)
     }
 
@@ -170,10 +198,12 @@ struct AppPresentationStateTests {
         state.refreshLaunchAtLoginState()
 
         #expect(state.launchAtLoginError == "无法迁移旧登录项")
+        #expect(state.canRetryLaunchAtLoginMigration)
 
         state.retryLaunchAtLoginMigration()
 
         #expect(state.launchAtLoginError == nil)
+        #expect(!state.canRetryLaunchAtLoginMigration)
         #expect(service.migrationCount == 2)
     }
 
@@ -251,6 +281,7 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
     private var storedEnableFailure: String?
     private var storedMigrationFailures: [String]
     private var storedLastErrorDescription: String?
+    private var storedHasMigrationError = false
     private var recordedMigrationCount = 0
 
     init(
@@ -276,6 +307,10 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
         lock.withLock { storedLastErrorDescription }
     }
 
+    var hasMigrationError: Bool {
+        lock.withLock { storedHasMigrationError }
+    }
+
     var migrationCount: Int {
         lock.withLock { recordedMigrationCount }
     }
@@ -295,9 +330,11 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
             if !storedMigrationFailures.isEmpty {
                 let failure = storedMigrationFailures.removeFirst()
                 storedLastErrorDescription = failure
+                storedHasMigrationError = true
                 throw PresentationTestFailure(message: failure)
             }
             storedLastErrorDescription = nil
+            storedHasMigrationError = false
         }
     }
 }

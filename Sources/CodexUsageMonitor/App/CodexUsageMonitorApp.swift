@@ -13,9 +13,12 @@ struct CodexUsageMonitorApp: App {
     init() {
         let model = LiveDependencies.makeViewModel()
         let runtime = AppRuntime(starter: model)
-        let dashboard = DashboardWindowController(model: model)
-        let menuBarVisibilityStore = MenuBarVisibilityStore()
         let launchAtLogin = LaunchAtLoginController()
+        let dashboard = DashboardWindowController(
+            model: model,
+            launchAtLogin: launchAtLogin
+        )
+        let menuBarVisibilityStore = MenuBarVisibilityStore()
         let launchCoordinator = AppLaunchCoordinator(
             arguments: ProcessInfo.processInfo.arguments,
             runtime: runtime,
@@ -32,7 +35,11 @@ struct CodexUsageMonitorApp: App {
 
     var body: some Scene {
         MenuBarExtra(isInserted: menuBarVisibilityBinding) {
-            UsagePopoverView(model: model, dashboard: dashboard)
+            UsagePopoverView(
+                model: model,
+                launchAtLogin: launchAtLogin,
+                dashboard: dashboard
+            )
                 .frame(width: 520, height: 480)
         } label: {
             MenuBarLabel(snapshot: model.snapshot)

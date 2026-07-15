@@ -8,6 +8,7 @@ final class SettingsViewState {
     private let notificationSender: any NotificationSending
     private(set) var isLaunchAtLoginEnabled: Bool
     private(set) var launchAtLoginError: String?
+    private(set) var canRetryLaunchAtLoginMigration: Bool
     private(set) var notificationsEnabled = false
     private(set) var twentyPercentNotificationsEnabled = true
     private(set) var tenPercentNotificationsEnabled = true
@@ -21,11 +22,13 @@ final class SettingsViewState {
         self.notificationSender = notificationSender
         isLaunchAtLoginEnabled = launchAtLogin.isEnabled
         launchAtLoginError = launchAtLogin.lastErrorDescription
+        canRetryLaunchAtLoginMigration = launchAtLogin.hasMigrationError
     }
 
     func setLaunchAtLoginEnabled(_ enabled: Bool) {
         let previousValue = isLaunchAtLoginEnabled
         launchAtLoginError = nil
+        canRetryLaunchAtLoginMigration = false
         do {
             try launchAtLogin.migrateLegacyRegistrationIfNeeded()
             try launchAtLogin.setEnabled(enabled)
@@ -33,21 +36,25 @@ final class SettingsViewState {
         } catch {
             isLaunchAtLoginEnabled = previousValue
             launchAtLoginError = error.localizedDescription
+            canRetryLaunchAtLoginMigration = launchAtLogin.hasMigrationError
         }
     }
 
     func refreshLaunchAtLoginState() {
         isLaunchAtLoginEnabled = launchAtLogin.isEnabled
         launchAtLoginError = launchAtLogin.lastErrorDescription
+        canRetryLaunchAtLoginMigration = launchAtLogin.hasMigrationError
     }
 
     func retryLaunchAtLoginMigration() {
+        guard canRetryLaunchAtLoginMigration else { return }
         launchAtLoginError = nil
         do {
             try launchAtLogin.migrateLegacyRegistrationIfNeeded()
             refreshLaunchAtLoginState()
         } catch {
             launchAtLoginError = launchAtLogin.lastErrorDescription ?? error.localizedDescription
+            canRetryLaunchAtLoginMigration = launchAtLogin.hasMigrationError
         }
     }
 
@@ -92,16 +99,18 @@ final class SettingsViewState {
 @MainActor
 struct SettingsView: View {
     let model: UsageViewModel
+    let launchAtLogin: any LaunchAtLoginServicing
     @State private var state: SettingsViewState
     @State private var menuBarVisibilityStore: MenuBarVisibilityStore
 
     init(
         model: UsageViewModel,
-        launchAtLogin: any LaunchAtLoginServicing = LaunchAtLoginController(),
+        launchAtLogin: any LaunchAtLoginServicing,
         notificationSender: any NotificationSending = UserNotificationSender(),
         menuBarVisibilityStore: MenuBarVisibilityStore
     ) {
         self.model = model
+        self.launchAtLogin = launchAtLogin
         _state = State(initialValue: SettingsViewState(
             launchAtLogin: launchAtLogin,
             notificationSender: notificationSender
@@ -126,8 +135,10 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                         .accessibilityLabel("登录启动设置失败，\(error)")
-                    Button("重试登录项迁移") {
-                        state.retryLaunchAtLoginMigration()
+                    if state.canRetryLaunchAtLoginMigration {
+                        Button("重试登录项迁移") {
+                            state.retryLaunchAtLoginMigration()
+                        }
                     }
                 }
             }

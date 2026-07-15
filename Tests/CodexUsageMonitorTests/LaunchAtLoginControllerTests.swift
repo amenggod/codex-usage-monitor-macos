@@ -51,10 +51,10 @@ struct LaunchAtLoginControllerTests {
         )
 
         try controller.migrateLegacyRegistrationIfNeeded()
-        try controller.setEnabled(true)
 
         #expect(legacy.operations == [.unregister])
         #expect(helper.operations == [.register])
+        #expect(helper.registrationStatus == .enabled)
     }
 
     @Test(arguments: [
@@ -89,23 +89,189 @@ struct LaunchAtLoginControllerTests {
         let suite = try isolatedDefaults()
         defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
         let legacy = LaunchAtLoginAdapterSpy(status: .requiresApproval)
+        let helper = LaunchAtLoginAdapterSpy(status: .notRegistered)
         let controller = LaunchAtLoginController(
-            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            adapter: helper,
             legacyAdapter: legacy,
             defaults: suite.defaults
         )
 
         try controller.migrateLegacyRegistrationIfNeeded()
 
+        #expect(helper.operations.isEmpty)
+        #expect(helper.registrationStatus == .notRegistered)
         #expect(legacy.operations == [.unregister])
+    }
+
+    @Test func helperRegisterFailurePreservesEnabledLegacyRegistration() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(
+            status: .notRegistered,
+            registerError: LaunchAtLoginTestFailure(message: "无法注册 helper")
+        )
+        let legacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginTestFailure.self) {
+            try controller.migrateLegacyRegistrationIfNeeded()
+        }
+
+        #expect(helper.operations == [.register])
+        #expect(legacy.operations.isEmpty)
+        #expect(legacy.registrationStatus == .enabled)
+
+        let retryHelper = LaunchAtLoginAdapterSpy(status: .notRegistered)
+        let retryLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        try LaunchAtLoginController(
+            adapter: retryHelper,
+            legacyAdapter: retryLegacy,
+            defaults: suite.defaults
+        ).migrateLegacyRegistrationIfNeeded()
+        #expect(retryHelper.operations == [.register])
+        #expect(retryLegacy.operations == [.unregister])
+    }
+
+    @Test func helperMustBecomeEnabledBeforeLegacyRegistrationIsRemoved() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(
+            status: .notRegistered,
+            registrationResultStatus: .requiresApproval
+        )
+        let legacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginMigrationError.self) {
+            try controller.migrateLegacyRegistrationIfNeeded()
+        }
+
+        #expect(helper.operations == [.register, .unregister])
+        #expect(legacy.operations.isEmpty)
+        #expect(legacy.registrationStatus == .enabled)
+    }
+
+    @Test func legacyUnregisterFailureRollsBackNewlyRegisteredHelper() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(status: .notRegistered)
+        let legacy = LaunchAtLoginAdapterSpy(
+            status: .enabled,
+            unregisterError: LaunchAtLoginTestFailure(message: "无法注销旧登录项")
+        )
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginTestFailure.self) {
+            try controller.migrateLegacyRegistrationIfNeeded()
+        }
+
+        #expect(helper.operations == [.register, .unregister])
+        #expect(helper.registrationStatus == .notRegistered)
+        #expect(legacy.registrationStatus == .enabled)
+    }
+
+    @Test func rollbackFailureSurfacesBothErrorsAndDoesNotCompleteMigration() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(
+            status: .notRegistered,
+            unregisterError: LaunchAtLoginTestFailure(message: "无法回滚新登录项")
+        )
+        let legacy = LaunchAtLoginAdapterSpy(
+            status: .enabled,
+            unregisterError: LaunchAtLoginTestFailure(message: "无法注销旧登录项")
+        )
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginMigrationError.self) {
+            try controller.migrateLegacyRegistrationIfNeeded()
+        }
+
+        #expect(helper.operations == [.register, .unregister])
+        #expect(controller.lastErrorDescription?.contains("无法注销旧登录项") == true)
+        #expect(controller.lastErrorDescription?.contains("无法回滚新登录项") == true)
+
+        let retryHelper = LaunchAtLoginAdapterSpy(status: .notRegistered)
+        let retryLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        try LaunchAtLoginController(
+            adapter: retryHelper,
+            legacyAdapter: retryLegacy,
+            defaults: suite.defaults
+        ).migrateLegacyRegistrationIfNeeded()
+        #expect(retryHelper.operations == [.register])
+        #expect(retryLegacy.operations == [.unregister])
+    }
+
+    @Test func preEnabledHelperIsNotRolledBackWhenLegacyUnregisterFails() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let helper = LaunchAtLoginAdapterSpy(status: .enabled)
+        let legacy = LaunchAtLoginAdapterSpy(
+            status: .enabled,
+            unregisterError: LaunchAtLoginTestFailure(message: "无法注销旧登录项")
+        )
+        let controller = LaunchAtLoginController(
+            adapter: helper,
+            legacyAdapter: legacy,
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginTestFailure.self) {
+            try controller.migrateLegacyRegistrationIfNeeded()
+        }
+
+        #expect(helper.operations.isEmpty)
+        #expect(helper.registrationStatus == .enabled)
+        #expect(legacy.operations == [.unregister])
+    }
+
+    @Test func unknownLegacyStatusFailsWithoutCompletingMigration() throws {
+        let suite = try isolatedDefaults()
+        defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
+        let controller = LaunchAtLoginController(
+            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            legacyAdapter: LaunchAtLoginAdapterSpy(status: .unknown),
+            defaults: suite.defaults
+        )
+
+        #expect(throws: LaunchAtLoginMigrationError.self) {
+            try controller.migrateLegacyRegistrationIfNeeded()
+        }
+
+        let retryHelper = LaunchAtLoginAdapterSpy(status: .notRegistered)
+        let retryLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        try LaunchAtLoginController(
+            adapter: retryHelper,
+            legacyAdapter: retryLegacy,
+            defaults: suite.defaults
+        ).migrateLegacyRegistrationIfNeeded()
+        #expect(retryHelper.operations == [.register])
+        #expect(retryLegacy.operations == [.unregister])
     }
 
     @Test func successfulLegacyMigrationPersistsAndRunsOnlyOnce() throws {
         let suite = try isolatedDefaults()
         defer { UserDefaults(suiteName: suite.name)?.removePersistentDomain(forName: suite.name) }
         let firstLegacy = LaunchAtLoginAdapterSpy(status: .enabled)
+        let firstHelper = LaunchAtLoginAdapterSpy(status: .notRegistered)
         let firstController = LaunchAtLoginController(
-            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            adapter: firstHelper,
             legacyAdapter: firstLegacy,
             defaults: suite.defaults
         )
@@ -121,6 +287,7 @@ struct LaunchAtLoginControllerTests {
         try secondController.migrateLegacyRegistrationIfNeeded()
 
         #expect(firstLegacy.operations == [.unregister])
+        #expect(firstHelper.operations == [.register])
         #expect(secondLegacy.operations.isEmpty)
     }
 
@@ -131,8 +298,9 @@ struct LaunchAtLoginControllerTests {
             status: .enabled,
             unregisterError: LaunchAtLoginTestFailure(message: "无法迁移旧登录项")
         )
+        let failingHelper = LaunchAtLoginAdapterSpy(status: .notRegistered)
         let failingController = LaunchAtLoginController(
-            adapter: LaunchAtLoginAdapterSpy(status: .notRegistered),
+            adapter: failingHelper,
             legacyAdapter: failingLegacy,
             defaults: suite.defaults
         )
@@ -150,6 +318,7 @@ struct LaunchAtLoginControllerTests {
         try retryController.migrateLegacyRegistrationIfNeeded()
 
         #expect(failingLegacy.operations == [.unregister])
+        #expect(failingHelper.operations == [.register, .unregister])
         #expect(retryLegacy.operations == [.unregister])
         #expect(failingController.lastErrorDescription == "无法迁移旧登录项")
     }
@@ -179,6 +348,7 @@ struct LaunchAtLoginControllerTests {
             defaults: suite.defaults
         ).migrateLegacyRegistrationIfNeeded()
         #expect(legacy.operations == [.unregister])
+        #expect(controller.isEnabled)
         #expect(laterLegacy.operations.isEmpty)
     }
 
@@ -256,16 +426,19 @@ private final class LaunchAtLoginAdapterSpy: @unchecked Sendable, LaunchAtLoginS
 
     private let lock = NSLock()
     private var storedStatus: LaunchAtLoginRegistrationStatus
+    private let registrationResultStatus: LaunchAtLoginRegistrationStatus
     private let registerError: (any Error)?
     private let unregisterError: (any Error)?
     private var recordedOperations: [Operation] = []
 
     init(
         status: LaunchAtLoginRegistrationStatus,
+        registrationResultStatus: LaunchAtLoginRegistrationStatus = .enabled,
         registerError: (any Error)? = nil,
         unregisterError: (any Error)? = nil
     ) {
         storedStatus = status
+        self.registrationResultStatus = registrationResultStatus
         self.registerError = registerError
         self.unregisterError = unregisterError
     }
@@ -283,7 +456,7 @@ private final class LaunchAtLoginAdapterSpy: @unchecked Sendable, LaunchAtLoginS
         try lock.withLock {
             recordedOperations.append(.register)
             if let registerError { throw registerError }
-            storedStatus = .enabled
+            storedStatus = registrationResultStatus
         }
     }
 

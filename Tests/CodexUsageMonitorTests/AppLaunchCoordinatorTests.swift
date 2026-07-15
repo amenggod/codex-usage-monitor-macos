@@ -109,7 +109,10 @@ struct AppLaunchCoordinatorTests {
         let model = LiveDependencies.makeFailureViewModel(
             error: DashboardTestFailure(message: "unused")
         )
-        let controller = DashboardWindowController(model: model)
+        let controller = DashboardWindowController(
+            model: model,
+            launchAtLogin: AppLaunchAtLoginSpy()
+        )
         defer { controller.close() }
 
         controller.showDashboard()
@@ -124,12 +127,16 @@ struct AppLaunchCoordinatorTests {
         let model = LiveDependencies.makeFailureViewModel(
             error: DashboardTestFailure(message: "unused")
         )
-        let dashboard = DashboardWindowController(model: model)
+        let launchAtLogin = AppLaunchAtLoginSpy()
+        let dashboard = DashboardWindowController(
+            model: model,
+            launchAtLogin: launchAtLogin
+        )
         let coordinator = AppLaunchCoordinator(
             arguments: [],
             runtime: AppRuntimeLauncherSpy(),
             dashboard: dashboard,
-            launchAtLogin: AppLaunchAtLoginSpy()
+            launchAtLogin: launchAtLogin
         )
         defer { dashboard.close() }
 
@@ -248,6 +255,7 @@ private final class AppLaunchAtLoginSpy: @unchecked Sendable, LaunchAtLoginServi
 
     var isEnabled: Bool { false }
     var lastErrorDescription: String? { migrationError?.localizedDescription }
+    var hasMigrationError: Bool { migrationError != nil }
     var migrationCount: Int { lock.withLock { recordedMigrationCount } }
 
     func setEnabled(_ enabled: Bool) throws {}

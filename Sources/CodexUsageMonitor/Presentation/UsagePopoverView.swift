@@ -4,7 +4,7 @@ import SwiftUI
 @MainActor
 struct UsagePopoverView: View {
     @Bindable var model: UsageViewModel
-    private let launchAtLogin: any LaunchAtLoginServicing
+    let launchAtLogin: any LaunchAtLoginServicing
     private let dashboard: (any DashboardPresenting)?
     @AppStorage("didAskLaunchAtLogin") private var didAskLaunchAtLogin = false
     @State private var showLaunchAtLoginPrompt = false
@@ -12,7 +12,7 @@ struct UsagePopoverView: View {
 
     init(
         model: UsageViewModel,
-        launchAtLogin: any LaunchAtLoginServicing = LaunchAtLoginController(),
+        launchAtLogin: any LaunchAtLoginServicing,
         dashboard: (any DashboardPresenting)? = nil
     ) {
         self.model = model
