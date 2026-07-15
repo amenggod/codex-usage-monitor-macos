@@ -5,6 +5,51 @@ import Testing
 @Suite("AppPresentationStateTests")
 struct AppPresentationStateTests {
     @MainActor
+    @Test func desktopAndBothModesShowCardWhileMenuBarModeHidesIt() throws {
+        let suiteName = "PresentationModeTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let surface = DesktopCardSurfaceSpy()
+        let controller = DesktopCardPresentationController(
+            surface: surface,
+            displayModeStore: DisplayModeStore(defaults: defaults)
+        )
+
+        controller.apply(mode: .desktop)
+        controller.apply(mode: .menuBar)
+        controller.apply(mode: .both)
+
+        #expect(surface.events == [.show, .hide, .show])
+    }
+
+    @MainActor
+    @Test func reopenShowsCardOnlyWhenCurrentModeIncludesDesktop() throws {
+        let suiteName = "PresentationReopenTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let surface = DesktopCardSurfaceSpy()
+        let controller = DesktopCardPresentationController(
+            surface: surface,
+            displayModeStore: DisplayModeStore(defaults: defaults)
+        )
+
+        controller.apply(mode: .menuBar)
+        surface.events.removeAll()
+        controller.handleReopen()
+        #expect(surface.events.isEmpty)
+
+        controller.apply(mode: .desktop)
+        surface.events.removeAll()
+        controller.handleReopen()
+        #expect(surface.events == [.show])
+
+        controller.apply(mode: .both)
+        surface.events.removeAll()
+        controller.handleReopen()
+        #expect(surface.events == [.show])
+    }
+
+    @MainActor
     @Test func displayModeDefaultsToDesktopAndPersists() throws {
         let suiteName = "DisplayModeTests-\(UUID().uuidString)"
         let suite = try #require(UserDefaults(suiteName: suiteName))
@@ -165,6 +210,29 @@ struct AppPresentationStateTests {
         #expect(state.tenPercentNotificationsEnabled)
         #expect(await !sender.isThresholdEnabled(20))
         #expect(await sender.isThresholdEnabled(10))
+    }
+}
+
+@MainActor
+private final class DesktopCardSurfaceSpy: DesktopCardPresenting {
+    enum Event: Equatable {
+        case show
+        case hide
+        case setExpanded(Bool)
+    }
+
+    var events: [Event] = []
+
+    func show() {
+        events.append(.show)
+    }
+
+    func hide() {
+        events.append(.hide)
+    }
+
+    func setExpanded(_ expanded: Bool) {
+        events.append(.setExpanded(expanded))
     }
 }
 
