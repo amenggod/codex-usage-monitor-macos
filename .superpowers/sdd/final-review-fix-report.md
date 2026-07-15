@@ -264,3 +264,131 @@ git status --short
 - 无已知功能疑虑。
 - 本地签名为仓库既有 ad-hoc 签名，只验证包完整性，不代表 Developer ID 签名或 Apple 公证。
 - 外接显示器真实拔插仍属于人工体验 QA；自动化已覆盖相同 notification 路径与确定性 frame 结果。
+
+---
+
+# Re-review Critical Fix: Event Identity Index Format
+
+修复起点：`50f9f34`
+
+代码提交：`455a103 fix: rebuild legacy event identity indexes`
+
+## Critical 根因
+
+`50f9f34` 把 token event identity 从毫秒时间改为完整 `Date` bit pattern，但 schema 仍是 v2，且当时的兼容迁移只给 cursor 增加 nullable `boundary_fingerprint`。旧 v2 cursor 因 NULL 指纹触发从 0 重扫时，新 identity ID 不等于数据库中旧毫秒 ID，`INSERT OR IGNORE` 无法判重，因此同一日志事件会以两种 ID 共存并重复计数。已经经过 `50f9f34`、有指纹列但无格式 marker 的过渡数据库同样无法证明其索引内容属于哪个 identity 格式。
+
+## 真实 RED
+
+测试使用两个完整 SQLite v2 fixture；二者均包含 sessions、usage_events、file_cursors、cumulative_usage、rate_limits、notification_receipts 及匹配的合成 JSONL。旧 ID 使用原生产毫秒算法真实计算，新 ID 使用当前完整精度算法。
+
+命令：
+
+```bash
+swift test --filter 'EndToEndIngestionTests.(oldVersionTwoMillisecondIndexRebuildsOnceAndPreservesReceipt|fingerprintPatchedVersionTwoWithoutMarkerDropsDuplicateIdentitiesAndRebuildsOnce)'
+```
+
+首次实际输出：退出码 `1`。
+
+- 旧毫秒-ID v2：migration + scan 后 total 预期 `10`、实际 `20`，event count 预期 `1`、实际 `2`，marker 预期 `2`、实际 `nil`；第二次 migrate/scan 仍为 `20/2/nil`。
+- 过渡 v2 fixture 首次检查因只读 SQLite 检查连接无法打开 WAL 而产生测试检查器错误；将该合成 fixture 的检查连接改为 READWRITE 后重新运行，得到有效行为 RED：预置旧/新两行未被清理，migration + scan 后仍为 total `20`、event count `2`、marker `nil`；第二次仍不恢复。
+- 两个 fixture 的 notification receipt 在旧实现下都仍存在，因此 RED 精确落在重复索引与 marker 缺失，而不是 receipt 丢失。
+
+新数据库 marker 的独立 RED：
+
+```bash
+swift test --filter 'UsageRepositoryTests.newDatabaseWritesCurrentEventIdentityMarkerImmediately'
+```
+
+实际输出：退出码 `1`；`index_metadata` 不存在，`hasMetadataTable` 为 false。
+
+## GREEN
+
+命令：
+
+```bash
+swift test --filter 'EndToEndIngestionTests.(oldVersionTwoMillisecondIndexRebuildsOnceAndPreservesReceipt|fingerprintPatchedVersionTwoWithoutMarkerDropsDuplicateIdentitiesAndRebuildsOnce)'
+swift test --filter 'UsageRepositoryTests.newDatabaseWritesCurrentEventIdentityMarkerImmediately'
+```
+
+实际输出：退出码 `0`；两项完整 E2E fixture 均通过，新库 marker 测试通过。
+
+两个 fixture 在第一次 migration + scan 后均为 event count `1`、total `10`、marker `2` 且 receipt 保留；第二次 migrate + scan 仍保持完全相同结果。
+
+## schema / index-format 兼容策略
+
+- `user_version` 保持 `2`；新增持久化表 `index_metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL)`。
+- 当前 marker 为 `event_identity_version = 2`，表示完整 `Date.timeIntervalSince1970.bitPattern` identity。
+- 新数据库在创建 v2 schema 的同一事务内立即写 marker。
+- v2 数据库 marker 缺失或小于当前版本时，先保留 `notification_receipts`，再清空 `index_metadata`、rate_limits、cumulative_usage、file_cursors、usage_events、sessions，将 `user_version` 置 0，随后创建当前完整 v2 schema 与 marker；调用方随后从 JSONL 重建。
+- 该路径覆盖旧 v2 无指纹数据库，也覆盖 `50f9f34` 已有 `boundary_fingerprint` 但无 marker、甚至已同时含旧/新重复行的过渡数据库。
+- marker 等于当前版本时只执行幂等 schema compatibility 检查并返回，不清空索引；因此重复 migrate/scan 幂等。
+- marker 大于当前版本时返回 `SQLITE_SCHEMA`，避免旧应用破坏性降级未来格式。
+- `resetIndex()` 现在总会删除 `index_metadata`；选择保留 receipts 时仍不删除 `notification_receipts`。
+- 本节取代报告前文“既有 v2 只补列”的兼容描述：对缺少当前 identity marker 的 v2，必须重建可派生索引，不能仅补列。
+
+## 聚焦与全量验证
+
+聚焦命令：
+
+```bash
+swift test --filter '(UsageRepositoryTests|SessionScannerTests|EndToEndIngestionTests)'
+```
+
+实际输出：退出码 `0`；`38 tests in 3 suites passed after 1.937 seconds`。
+
+全量命令：
+
+```bash
+swift test
+```
+
+实际输出：退出码 `0`；`170 tests in 18 suites passed after 3.605 seconds`。
+
+协调器十轮命令：
+
+```bash
+for round in {1..10}; do swift test --filter 'IngestionCoordinatorTests'; done
+```
+
+实际输出：10/10 轮通过，每轮 `20 tests in 1 suite passed`；耗时依次为 `3.428, 3.411, 3.454, 3.479, 3.376, 3.405, 3.397, 3.459, 3.489, 3.518` 秒，共 `200/200`。
+
+## Release / plist / codesign / ZIP / diff
+
+```bash
+bash Scripts/build-app.sh
+plutil -lint 'dist/Codex Usage Monitor.app/Contents/Info.plist'
+codesign --verify --deep --strict --verbose=2 'dist/Codex Usage Monitor.app'
+unzip -t 'dist/Codex-Usage-Monitor-macOS.zip'
+git diff --check
+git status --short
+```
+
+实际输出：退出码 `0`；Release build `Build complete! (4.34s)`；plist `OK`；app `valid on disk` 且 `satisfies its Designated Requirement`；ZIP `No errors detected in compressed data`；`git diff --check` 无输出。提交前 status 仅包含本轮 2 个生产文件与 2 个测试文件。
+
+## CI
+
+- 提交：`455a103e13a5ce6301fe9ca7e47e4b0fdd371bde`
+- Run：[CI 29419553854](https://github.com/amenggod/codex-usage-monitor-macos/actions/runs/29419553854)
+- 结果：`success`，job `test` 用时 `1m56s`。
+- `Test`：success（170 项全量测试）。
+- `Build app bundle`：success。
+- 唯一 annotation 是 `actions/checkout@v4` 的 Node.js 20 弃用提示，与本修复无关。
+
+## 本轮修改文件
+
+- `Sources/CodexUsageMonitor/Persistence/UsageSchema.swift`
+- `Sources/CodexUsageMonitor/Persistence/UsageRepository.swift`
+- `Tests/CodexUsageMonitorTests/EndToEndIngestionTests.swift`
+- `Tests/CodexUsageMonitorTests/UsageRepositoryTests.swift`
+- `.superpowers/sdd/final-review-fix-report.md`
+
+未修改 scanner 生产代码或调用方：现有 scanner 在 migration 重建后自然从无 cursor 状态全量扫描，已满足重建语义。
+
+## Critical 自审与疑虑
+
+- 两个要求的完整 fixture 都先观察到真实重复计数 RED，再实现 marker；没有只检查列存在。
+- receipt 在 migration 前后及第二次 migrate/scan 后均由真实 repository 查询确认存在。
+- sessions/events/cursors/cumulative/limits 均通过 reset 路径清理；重扫只生成当前 identity 行。
+- 新库立即有 marker；当前 marker 重复 migrate 不重建；旧 marker 与缺失 marker 走同一保 receipt 重建分支。
+- 没有读取真实 `~/.codex`、真实 UserDefaults 或真实屏幕。
+- 无已知功能疑虑；本地仍为 ad-hoc 签名，非 Developer ID/公证。
