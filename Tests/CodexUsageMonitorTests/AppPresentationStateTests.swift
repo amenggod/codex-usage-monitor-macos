@@ -165,6 +165,19 @@ struct AppPresentationStateTests {
     }
 
     @MainActor
+    @Test func widgetSharingFailureAppearsWithoutChangingNotificationOrLoginState() {
+        let state = SettingsViewState(
+            launchAtLogin: LaunchAtLoginServiceSpy(enabled: true),
+            notificationSender: PresentationNotificationSenderSpy(enabled: false),
+            widgetSharingStatus: .unavailable("小组件共享不可用")
+        )
+
+        #expect(state.widgetSharingMessage == "小组件共享不可用")
+        #expect(state.isLaunchAtLoginEnabled)
+        #expect(!state.notificationsEnabled)
+    }
+
+    @MainActor
     @Test func successfulLaunchAtLoginChangeClearsPreviousError() {
         let service = LaunchAtLoginServiceSpy(enabled: false, enableFailure: "首次失败")
         let state = SettingsViewState(

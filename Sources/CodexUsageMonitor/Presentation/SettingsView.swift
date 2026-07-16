@@ -13,16 +13,19 @@ final class SettingsViewState {
     private(set) var twentyPercentNotificationsEnabled = true
     private(set) var tenPercentNotificationsEnabled = true
     private(set) var notificationMessage: String?
+    private(set) var widgetSharingMessage: String?
 
     init(
         launchAtLogin: any LaunchAtLoginServicing,
-        notificationSender: any NotificationSending
+        notificationSender: any NotificationSending,
+        widgetSharingStatus: WidgetSharingStatus? = nil
     ) {
         self.launchAtLogin = launchAtLogin
         self.notificationSender = notificationSender
         isLaunchAtLoginEnabled = launchAtLogin.isEnabled
         launchAtLoginError = launchAtLogin.lastErrorDescription
         canRetryLaunchAtLoginMigration = launchAtLogin.hasMigrationError
+        setWidgetSharingStatus(widgetSharingStatus)
     }
 
     func setLaunchAtLoginEnabled(_ enabled: Bool) {
@@ -91,6 +94,14 @@ final class SettingsViewState {
             break
         }
     }
+
+    func setWidgetSharingStatus(_ status: WidgetSharingStatus?) {
+        guard case let .unavailable(message) = status else {
+            widgetSharingMessage = nil
+            return
+        }
+        widgetSharingMessage = message
+    }
 }
 
 @MainActor
@@ -110,7 +121,8 @@ struct SettingsView: View {
         self.launchAtLogin = launchAtLogin
         _state = State(initialValue: SettingsViewState(
             launchAtLogin: launchAtLogin,
-            notificationSender: notificationSender
+            notificationSender: notificationSender,
+            widgetSharingStatus: model.widgetSharingStatus
         ))
         _menuBarVisibilityStore = State(initialValue: menuBarVisibilityStore)
     }
@@ -118,15 +130,31 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("显示") {
-                Toggle("显示顶部菜单栏", isOn: menuBarVisibilityBinding)
-                Text("桌面小组件由 macOS 管理：在桌面空白处右键，选择“编辑小组件”，然后搜索 Codex Usage Monitor。")
+                Toggle("显示菜单栏图标", isOn: menuBarVisibilityBinding)
+                Text("菜单栏图标可单独开关；关闭图标不会移除系统桌面小组件。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
+            Section("桌面小组件") {
+                Text("在桌面空白处右键，选择“编辑小组件”，搜索 Codex Usage Monitor，再添加小号或中号小组件。应用无法自动将小组件固定到桌面。")
+                Text("点击小组件会打开同一个完整面板窗口。刷新时机由 WidgetKit 决定，不保证秒级更新。")
+                Text("主应用需在后台运行，才会监控新的 Codex 日志并将脱敏快照写入 App Group；5 小时限额缺失或过期时会自动隐藏。")
+                if let message = state.widgetSharingMessage {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("小组件共享失败，\(message)")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
             Section("启动") {
                 Toggle("登录时启动", isOn: launchAtLoginBinding)
                     .accessibilityHint("控制 Codex Usage Monitor 是否在登录后自动运行")
+                Text("登录时启动会在登录后静默运行并继续监控，不会自动打开窗口。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 if let error = state.launchAtLoginError {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -163,7 +191,11 @@ struct SettingsView: View {
         .padding()
         .task {
             state.refreshLaunchAtLoginState()
+            state.setWidgetSharingStatus(model.widgetSharingStatus)
             await state.loadNotificationSettings()
+        }
+        .onChange(of: model.widgetSharingStatus) { _, status in
+            state.setWidgetSharingStatus(status)
         }
     }
 
