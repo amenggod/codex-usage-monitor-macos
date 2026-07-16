@@ -62,10 +62,10 @@ final class AppLaunchCoordinator {
 
     func applicationDidFinishLaunching() async {
         try? launchAtLogin.migrateLegacyRegistrationIfNeeded()
-        await runtime.launch()
         if !isBackgroundLaunch {
             dashboard.showDashboard()
         }
+        await runtime.launch()
     }
 
     func handleReopen() {

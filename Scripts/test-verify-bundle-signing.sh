@@ -18,14 +18,19 @@ path=""
 operation="verify"
 previous_argument=""
 requirement=""
+entitlements_target=""
 strict="NO"
 for argument in "$@"; do
   path="$argument"
   if [[ "$previous_argument" == "-R" || "$previous_argument" == "--test-requirement" ]]; then
     requirement="$argument"
   fi
+  if [[ "$previous_argument" == "--entitlements" ]]; then
+    entitlements_target="$argument"
+  fi
   case "$argument" in
     -d*) operation="display" ;;
+    --entitlements) operation="entitlements" ;;
     -R|--test-requirement) operation="requirement" ;;
     --strict) strict="YES" ;;
   esac
@@ -33,7 +38,7 @@ for argument in "$@"; do
 done
 printf '%s|%s\n' "$operation" "$path" >>"${CODESIGN_LOG:?}"
 
-if [[ "$operation" != "display" && "$strict" != "YES" ]]; then
+if [[ "$operation" != "display" && "$operation" != "entitlements" && "$strict" != "YES" ]]; then
   echo "codesign verification omitted --strict" >&2
   exit 2
 fi
@@ -58,11 +63,61 @@ if [[ "$profile" == "nested-ad-hoc" && "$path" == *CodexUsageMonitorWidget* ]]; 
 fi
 
 if [[ "$operation" == "requirement" ]]; then
-  if [[ "$profile" == "self-signed" ]]; then
+  if [[ "$profile" == "self-signed" || "$profile" == "unsigned" ]]; then
     exit 1
   fi
   if [[ "$profile" == "nested-ad-hoc" && "$path" == *CodexUsageMonitorWidget* ]]; then
     exit 1
+  fi
+  exit 0
+fi
+
+if [[ "$operation" == "entitlements" ]]; then
+  if [[ "$entitlements_target" != ":-" ]]; then
+    echo "codesign entitlement extraction did not use :-" >&2
+    exit 2
+  fi
+
+  group="group.com.amenggod.CodexUsageMonitor"
+  include_group="YES"
+  case "$profile" in
+    missing-entitlement)
+      if [[ "$path" == *CodexUsageMonitorWidget.appex ]]; then
+        include_group="NO"
+      fi
+      ;;
+    wrong-group)
+      group="group.com.example.WrongUsageMonitor"
+      ;;
+    whitespace-group)
+      group="group.com.amenggod.CodexUsageMonitor "
+      ;;
+    app-widget-mismatch)
+      if [[ "$path" == *CodexUsageMonitorWidget.appex ]]; then
+        group="group.com.example.WidgetMismatch"
+      fi
+      ;;
+  esac
+
+  if [[ "$include_group" == "YES" ]]; then
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+      '<plist version="1.0">' \
+      '<dict>' \
+      '  <key>com.apple.security.application-groups</key>' \
+      '  <array>' \
+      "    <string>$group</string>" \
+      '  </array>' \
+      '</dict>' \
+      '</plist>'
+  else
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+      '<plist version="1.0">' \
+      '<dict/>' \
+      '</plist>'
   fi
   exit 0
 fi
@@ -113,6 +168,10 @@ expect_rejected() {
 expect_rejected self-signed
 expect_rejected nested-ad-hoc
 expect_rejected different-team
+expect_rejected missing-entitlement
+expect_rejected wrong-group
+expect_rejected whitespace-group
+expect_rejected app-widget-mismatch
 
 marked_signed_app="$TMP/marked-signed.app"
 ditto "$BASE_APP" "$marked_signed_app"
@@ -162,6 +221,33 @@ for path in "${signed_paths[@]}"; do
     fi
   done
 done
+
+entitlement_paths=(
+  "$valid_app"
+  "$valid_app/Contents/PlugIns/CodexUsageMonitorWidget.appex"
+)
+for path in "${entitlement_paths[@]}"; do
+  if ! grep -Fq "entitlements|$path" "$LOG"; then
+    echo "missing signed entitlement extraction for: $path" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+: >"$LOG"
+if ! PATH="$TMP:$PATH" \
+  CODESIGN_BIN="$STUB" \
+  CODESIGN_LOG="$LOG" \
+  SIGNING_PROFILE=unsigned \
+  bash "$VERIFY" "$BASE_APP" \
+  >/dev/null
+then
+  echo "expected unsigned fixture to remain accepted" >&2
+  failures=$((failures + 1))
+fi
+if grep -q '^entitlements|' "$LOG"; then
+  echo "unsigned verification unexpectedly extracted signed entitlements" >&2
+  failures=$((failures + 1))
+fi
 
 if ! grep -q 'no bundle resource seal or identity-backed signature' \
   "$BASE_APP/Contents/Resources/UNSIGNED_BUILD.txt"

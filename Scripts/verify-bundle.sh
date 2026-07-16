@@ -3,6 +3,7 @@ set -euo pipefail
 
 APP="${1:?usage: verify-bundle.sh /path/to/app}"
 CODESIGN_BIN="${CODESIGN_BIN:-/usr/bin/codesign}"
+EXPECTED_APP_GROUP="group.com.amenggod.CodexUsageMonitor"
 
 fail() {
   echo "bundle verification failed: $*" >&2
@@ -81,6 +82,26 @@ verify_signed_code() {
     fail \
       "TeamIdentifier mismatch for $path: $team_identifier (expected $EXPECTED_TEAM_IDENTIFIER)"
   fi
+}
+
+extract_app_groups() {
+  local path="$1"
+  local output="$2"
+  local groups
+
+  "$CODESIGN_BIN" -d --entitlements :- "$path" >"$output" 2>/dev/null ||
+    fail "unable to extract signed entitlements: $path"
+  plutil -lint "$output" >/dev/null ||
+    fail "invalid signed entitlements plist: $path"
+  groups="$(
+    plutil \
+      -extract 'com\.apple\.security\.application-groups' \
+      json \
+      -o - \
+      "$output" \
+      2>/dev/null
+  )" || fail "missing App Group entitlement: $path"
+  printf '%s\n' "$groups"
 }
 
 require_directory "$APP"
@@ -251,6 +272,27 @@ else
   for path in "${signed_paths[@]}"; do
     verify_signed_code "$path"
   done
+
+  previous_umask="$(umask)"
+  umask 077
+  entitlements_tmp="$(
+    mktemp -d "${TMPDIR:-/tmp}/codex-usage-entitlements.XXXXXX"
+  )" || fail "unable to create entitlement verification directory"
+  umask "$previous_umask"
+  trap 'rm -rf -- "$entitlements_tmp"' EXIT
+  app_groups="$(
+    extract_app_groups "$APP" "$entitlements_tmp/app-entitlements.plist"
+  )"
+  widget_groups="$(
+    extract_app_groups "$WIDGET" "$entitlements_tmp/widget-entitlements.plist"
+  )"
+  expected_groups="[\"$EXPECTED_APP_GROUP\"]"
+  [[ "$app_groups" == "$widget_groups" ]] ||
+    fail "App Group entitlements differ between main app and Widget"
+  [[ "$app_groups" == "$expected_groups" ]] ||
+    fail \
+      "App Group entitlements are '$app_groups' (expected the single group '$EXPECTED_APP_GROUP')"
+
   echo \
-    "Bundle structure and Apple identity-backed signatures verified for team $EXPECTED_TEAM_IDENTIFIER."
+    "Bundle structure, App Group entitlements, and Apple identity-backed signatures verified for team $EXPECTED_TEAM_IDENTIFIER."
 fi

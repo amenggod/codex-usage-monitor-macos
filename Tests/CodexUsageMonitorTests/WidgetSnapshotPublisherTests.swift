@@ -250,6 +250,132 @@ struct WidgetSnapshotPublisherTests {
                 == .unavailable("小组件共享不可用")
         )
     }
+
+    @Test func rebuildingPreservesEveryTrustedFieldAndTheReliableSuccessTime() async throws {
+        let lastSuccessfulAt = testNow.addingTimeInterval(-300)
+        let original = makeStoredWidgetSnapshot(
+            generatedAt: testNow.addingTimeInterval(-60),
+            state: .fresh(lastSuccessfulAt: lastSuccessfulAt)
+        )
+        let store = WidgetStoreSpy(initialSnapshot: original)
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([]),
+            store: store,
+            reloader: WidgetReloaderSpy()
+        )
+
+        #expect(await publisher.publishRebuilding(now: testNow) == .ready(testNow))
+
+        let written = try #require(store.lastSnapshot)
+        #expect(written.generatedAt == original.generatedAt)
+        #expect(written.todayTokens == original.todayTokens)
+        #expect(written.allTimeTokens == original.allTimeTokens)
+        #expect(written.fiveHourLimit == original.fiveHourLimit)
+        #expect(written.weekLimit == original.weekLimit)
+        #expect(written.projects == original.projects)
+        #expect(written.state == .rebuilding(lastSuccessfulAt: lastSuccessfulAt))
+    }
+
+    @Test func rebuildingCarriesSuccessTimeFromEveryReliablePriorState() async throws {
+        let reliableTime = testNow.addingTimeInterval(-600)
+        let states: [WidgetDataState] = [
+            .fresh(lastSuccessfulAt: reliableTime),
+            .partial(lastSuccessfulAt: reliableTime, failedFiles: 2),
+            .stale(lastSuccessfulAt: reliableTime),
+            .rebuilding(lastSuccessfulAt: reliableTime),
+        ]
+
+        for state in states {
+            let store = WidgetStoreSpy(
+                initialSnapshot: makeStoredWidgetSnapshot(state: state)
+            )
+            let publisher = WidgetSnapshotPublisher(
+                aggregator: WidgetPublisherAggregatorSpy([]),
+                store: store,
+                reloader: WidgetReloaderSpy()
+            )
+
+            _ = await publisher.publishRebuilding(now: testNow)
+
+            #expect(try #require(store.lastSnapshot).state == .rebuilding(
+                lastSuccessfulAt: reliableTime
+            ))
+        }
+    }
+
+    @Test func rebuildingWithoutPriorSnapshotPublishesUnavailableDisplayState() async throws {
+        let store = WidgetStoreSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([]),
+            store: store,
+            reloader: WidgetReloaderSpy()
+        )
+
+        #expect(await publisher.publishRebuilding(now: testNow) == .ready(testNow))
+
+        let written = try #require(store.lastSnapshot)
+        #expect(written.generatedAt == testNow)
+        #expect(written.state == .rebuilding(lastSuccessfulAt: nil))
+        #expect(!WidgetDisplayModel(snapshot: written, now: testNow).canDisplayUsageValues)
+    }
+
+    @Test func repeatedRebuildingReloadsOnceAndCompletedPublishRestoresFreshValues() async throws {
+        let priorTime = testNow.addingTimeInterval(-120)
+        let store = WidgetStoreSpy(
+            initialSnapshot: makeStoredWidgetSnapshot(
+                state: .fresh(lastSuccessfulAt: priorTime)
+            )
+        )
+        let reloader = WidgetReloaderSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([
+                makeSnapshot(range: .today, total: 24, projects: []),
+                makeSnapshot(range: .all, total: 240, projects: []),
+            ]),
+            store: store,
+            reloader: reloader
+        )
+
+        _ = await publisher.publishRebuilding(now: testNow)
+        _ = await publisher.publishRebuilding(now: testNow.addingTimeInterval(1))
+        #expect(reloader.reloadCount == 1)
+
+        let completedAt = testNow.addingTimeInterval(2)
+        _ = await publisher.publish(
+            now: completedAt,
+            calendar: testCalendar,
+            freshness: .fresh(completedAt)
+        )
+
+        let completed = try #require(store.lastSnapshot)
+        #expect(completed.todayTokens == 24)
+        #expect(completed.allTimeTokens == 240)
+        #expect(completed.generatedAt == completedAt)
+        #expect(completed.state == .fresh(lastSuccessfulAt: completedAt))
+        #expect(reloader.reloadCount == 2)
+    }
+
+    @Test func rebuildingStoreReadOrWriteFailureReturnsUnavailable() async {
+        let readFailurePublisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([]),
+            store: WidgetStoreSpy(readFailure: WidgetStoreTestFailure()),
+            reloader: WidgetReloaderSpy()
+        )
+        let writeFailurePublisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([]),
+            store: WidgetStoreSpy(writeFailure: WidgetStoreTestFailure()),
+            reloader: WidgetReloaderSpy()
+        )
+
+        #expect(
+            await readFailurePublisher.publishRebuilding(now: testNow)
+                == .unavailable("小组件共享不可用")
+        )
+        #expect(
+            await writeFailurePublisher.publishRebuilding(now: testNow)
+                == .unavailable("小组件共享不可用")
+        )
+    }
 }
 
 private actor WidgetPublisherAggregatorSpy: UsageAggregating, WidgetSnapshotAggregating {
@@ -327,16 +453,28 @@ private actor GatedWidgetPublisherAggregator: UsageAggregating, WidgetSnapshotAg
 private final class WidgetStoreSpy: @unchecked Sendable, WidgetSnapshotStoring {
     private let lock = NSLock()
     private var storedSnapshots: [WidgetUsageSnapshot] = []
+    private let readFailure: WidgetStoreTestFailure?
     private let writeFailure: WidgetStoreTestFailure?
 
-    init(writeFailure: WidgetStoreTestFailure? = nil) {
+    init(
+        initialSnapshot: WidgetUsageSnapshot? = nil,
+        readFailure: WidgetStoreTestFailure? = nil,
+        writeFailure: WidgetStoreTestFailure? = nil
+    ) {
+        if let initialSnapshot {
+            storedSnapshots = [initialSnapshot]
+        }
+        self.readFailure = readFailure
         self.writeFailure = writeFailure
     }
 
     var snapshots: [WidgetUsageSnapshot] { lock.withLock { storedSnapshots } }
     var lastSnapshot: WidgetUsageSnapshot? { snapshots.last }
 
-    func read() throws -> WidgetUsageSnapshot? { lastSnapshot }
+    func read() throws -> WidgetUsageSnapshot? {
+        if let readFailure { throw readFailure }
+        return lastSnapshot
+    }
 
     func write(_ snapshot: WidgetUsageSnapshot) throws {
         if let writeFailure { throw writeFailure }
@@ -398,6 +536,31 @@ private func usage(_ total: Int64) -> TokenUsage {
         output: 0,
         reasoningOutput: 0,
         total: total
+    )
+}
+
+private func makeStoredWidgetSnapshot(
+    generatedAt: Date = testNow.addingTimeInterval(-60),
+    state: WidgetDataState = .fresh(lastSuccessfulAt: testNow.addingTimeInterval(-60))
+) -> WidgetUsageSnapshot {
+    WidgetUsageSnapshot(
+        generatedAt: generatedAt,
+        todayTokens: 12,
+        allTimeTokens: 120,
+        fiveHourLimit: WidgetLimitStatus(
+            id: "five",
+            remainingPercent: 64,
+            resetsAt: testNow.addingTimeInterval(3_600)
+        ),
+        weekLimit: WidgetLimitStatus(
+            id: "week",
+            remainingPercent: 72,
+            resetsAt: testNow.addingTimeInterval(86_400)
+        ),
+        projects: [
+            WidgetProjectUsage(id: "project", name: "Project", tokens: 80)
+        ],
+        state: state
     )
 }
 

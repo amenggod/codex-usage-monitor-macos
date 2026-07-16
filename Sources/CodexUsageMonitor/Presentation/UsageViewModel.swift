@@ -87,6 +87,7 @@ final class UsageViewModel {
             await refresh(partialFailedFiles: failedFiles)
         case let .rebuilding(completed, total):
             refreshGeneration &+= 1
+            let generation = refreshGeneration
             snapshot = DashboardSnapshot(
                 range: selectedRange,
                 total: snapshot.total,
@@ -94,6 +95,11 @@ final class UsageViewModel {
                 limits: snapshot.limits,
                 freshness: .rebuilding(completed: completed, total: total)
             )
+            if let widgetPublisher {
+                let status = await widgetPublisher.publishRebuilding(now: .now)
+                guard generation == refreshGeneration else { return }
+                widgetSharingStatus = status
+            }
         case let .failed(message):
             invalidateRefreshAndApply(IngestionFailure(message: message))
         }

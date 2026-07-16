@@ -23,6 +23,34 @@ struct AppLaunchCoordinatorTests {
     }
 
     @MainActor
+    @Test func foregroundLaunchShowsDashboardBeforeRuntimeCompletesAndStartsRuntimeOnce() async {
+        let runtime = GatedAppRuntimeLauncher()
+        let dashboard = DashboardPresenterSpy()
+        let coordinator = AppLaunchCoordinator(
+            arguments: ["CodexUsageMonitor"],
+            runtime: runtime,
+            dashboard: dashboard,
+            launchAtLogin: AppLaunchAtLoginSpy()
+        )
+
+        let launch = Task {
+            await coordinator.applicationDidFinishLaunching()
+        }
+        for _ in 0..<100 where runtime.startCount == 0 {
+            await Task.yield()
+        }
+
+        #expect(runtime.startCount == 1)
+        #expect(dashboard.showCount == 1)
+
+        runtime.succeed()
+        await launch.value
+
+        #expect(runtime.startCount == 1)
+        #expect(dashboard.showCount == 1)
+    }
+
+    @MainActor
     @Test func backgroundLaunchStartsRuntimeWithoutShowingDashboard() async {
         let runtime = AppRuntimeLauncherSpy()
         let dashboard = DashboardPresenterSpy()
@@ -232,6 +260,24 @@ private final class AppRuntimeLauncherSpy: AppRuntimeLaunching {
 
     func launch() async {
         startCount += 1
+    }
+}
+
+@MainActor
+private final class GatedAppRuntimeLauncher: AppRuntimeLaunching {
+    private(set) var startCount = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func launch() async {
+        startCount += 1
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func succeed() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

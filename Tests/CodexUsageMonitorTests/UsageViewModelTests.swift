@@ -181,6 +181,94 @@ struct UsageViewModelTests {
     }
 
     @MainActor
+    @Test func rebuildingUsesStateOnlyWidgetPublishAndCompletionRecoversFreshPublication() async {
+        let initial = makeSnapshot(total: 18, limits: [makeLimit(usedPercent: 61)])
+        let refreshed = makeSnapshot(total: 25, limits: [makeLimit(usedPercent: 40)])
+        let aggregator = AggregatorSpy([.success(initial), .success(refreshed)])
+        let coordinator = CoordinatorSpy()
+        let widgetPublisher = FreshnessRecordingWidgetPublisher()
+        let viewModel = UsageViewModel(
+            aggregator: aggregator,
+            coordinator: coordinator,
+            widgetPublisher: widgetPublisher
+        )
+        await viewModel.start()
+        #expect(await eventually { await widgetPublisher.freshnessValues.count == 1 })
+
+        await coordinator.send(.rebuilding(completed: 1, total: 3))
+
+        #expect(await eventually { await widgetPublisher.rebuildingRequestCount == 1 })
+        #expect(viewModel.snapshot.total == initial.total)
+        #expect(await aggregator.requestedRanges == [.today])
+
+        await coordinator.send(.completed)
+
+        #expect(await eventually {
+            let publicationCount = await widgetPublisher.freshnessValues.count
+            return viewModel.snapshot.total == refreshed.total && publicationCount == 2
+        })
+        #expect(await widgetPublisher.lastFreshness == refreshed.freshness)
+        #expect(await aggregator.requestedRanges == [.today, .today])
+    }
+
+    @MainActor
+    @Test func rebuildingWidgetFailureDoesNotReplaceTheTrustedDashboard() async {
+        let initial = makeSnapshot(total: 18, limits: [makeLimit(usedPercent: 61)])
+        let coordinator = CoordinatorSpy()
+        let viewModel = UsageViewModel(
+            aggregator: AggregatorSpy([.success(initial)]),
+            coordinator: coordinator,
+            widgetPublisher: RebuildingUnavailableWidgetPublisher()
+        )
+        await viewModel.start()
+        await settleAsyncWork()
+
+        await coordinator.send(.rebuilding(completed: 1, total: 3))
+
+        #expect(await eventually {
+            viewModel.widgetSharingStatus == .unavailable("rebuilding store unavailable")
+        })
+        #expect(viewModel.snapshot.total == initial.total)
+        #expect(viewModel.snapshot.projects == initial.projects)
+        #expect(viewModel.snapshot.limits == initial.limits)
+        #expect(viewModel.snapshot.freshness == .rebuilding(completed: 1, total: 3))
+    }
+
+    @MainActor
+    @Test func lateRebuildingWidgetFailureCannotOverwriteNewerRefreshStatus() async {
+        let initial = makeSnapshot(total: 10)
+        let all = makeSnapshot(range: .all, total: 100)
+        let currentToday = makeSnapshot(total: 12)
+        let coordinator = CoordinatorSpy()
+        let widgetPublisher = GatedRebuildingWidgetPublisher()
+        let viewModel = UsageViewModel(
+            aggregator: AggregatorSpy([
+                .success(initial),
+                .success(all),
+                .success(currentToday),
+            ]),
+            coordinator: coordinator,
+            widgetPublisher: widgetPublisher
+        )
+        await viewModel.start()
+        await settleAsyncWork()
+
+        await coordinator.send(.rebuilding(completed: 1, total: 3))
+        #expect(await eventually { await widgetPublisher.hasPendingRebuilding })
+
+        await viewModel.selectRange(.all)
+        #expect(viewModel.widgetSharingStatus == .ready(testWidgetStatusDate))
+
+        await widgetPublisher.finishRebuilding(
+            with: .unavailable("old rebuilding status")
+        )
+        await settleAsyncWork()
+
+        #expect(viewModel.snapshot == all)
+        #expect(viewModel.widgetSharingStatus == .ready(testWidgetStatusDate))
+    }
+
+    @MainActor
     @Test func failedUpdateRetainsTheLastSuccessfulDashboardAsStale() async {
         let initial = makeSnapshot(total: 18, limits: [makeLimit(usedPercent: 61)])
         let aggregator = AggregatorSpy([.success(initial)])
@@ -617,6 +705,7 @@ private actor NotifierSpy: LimitNotifying {
 
 private actor FreshnessRecordingWidgetPublisher: WidgetSnapshotPublishing {
     private(set) var freshnessValues: [DataFreshness?] = []
+    private(set) var rebuildingRequestCount = 0
 
     var lastFreshness: DataFreshness? {
         freshnessValues.last ?? nil
@@ -635,6 +724,44 @@ private actor FreshnessRecordingWidgetPublisher: WidgetSnapshotPublishing {
         freshnessValues.append(freshness)
         return .ready(now)
     }
+
+    func publishRebuilding(now: Date) async -> WidgetSharingStatus {
+        rebuildingRequestCount += 1
+        return .ready(now)
+    }
+}
+
+private actor RebuildingUnavailableWidgetPublisher: WidgetSnapshotPublishing {
+    func publish(now: Date, calendar: Calendar) async -> WidgetSharingStatus {
+        .ready(now)
+    }
+
+    func publishRebuilding(now: Date) async -> WidgetSharingStatus {
+        .unavailable("rebuilding store unavailable")
+    }
+}
+
+private actor GatedRebuildingWidgetPublisher: WidgetSnapshotPublishing {
+    private var rebuildingContinuation: CheckedContinuation<WidgetSharingStatus, Never>?
+
+    var hasPendingRebuilding: Bool {
+        rebuildingContinuation != nil
+    }
+
+    func publish(now: Date, calendar: Calendar) async -> WidgetSharingStatus {
+        .ready(testWidgetStatusDate)
+    }
+
+    func publishRebuilding(now: Date) async -> WidgetSharingStatus {
+        await withCheckedContinuation { continuation in
+            rebuildingContinuation = continuation
+        }
+    }
+
+    func finishRebuilding(with status: WidgetSharingStatus) {
+        rebuildingContinuation?.resume(returning: status)
+        rebuildingContinuation = nil
+    }
 }
 
 private actor GatedWidgetStatusPublisher: WidgetSnapshotPublishing {
@@ -646,6 +773,10 @@ private actor GatedWidgetStatusPublisher: WidgetSnapshotPublishing {
         await withCheckedContinuation { continuation in
             continuations.append(continuation)
         }
+    }
+
+    func publishRebuilding(now: Date) async -> WidgetSharingStatus {
+        .ready(now)
     }
 
     func succeedFirst(with status: WidgetSharingStatus) {

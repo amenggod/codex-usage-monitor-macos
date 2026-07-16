@@ -14,6 +14,7 @@ protocol WidgetSnapshotPublishing: Sendable {
         calendar: Calendar,
         freshness: DataFreshness?
     ) async -> WidgetSharingStatus
+    func publishRebuilding(now: Date) async -> WidgetSharingStatus
 }
 
 extension WidgetSnapshotPublishing {
@@ -57,15 +58,7 @@ actor WidgetSnapshotPublisher: WidgetSnapshotPublishing {
         calendar: Calendar,
         freshness: DataFreshness?
     ) async -> WidgetSharingStatus {
-        requestSequence &+= 1
-        let request = WidgetPublicationRequest(now: now, sequence: requestSequence)
-        if let newestRequest {
-            if request.isNewer(than: newestRequest) {
-                self.newestRequest = request
-            }
-        } else {
-            newestRequest = request
-        }
+        let request = registerRequest(now: now)
 
         do {
             let dashboards = try await aggregator.widgetSnapshots(now: now, calendar: calendar)
@@ -88,12 +81,59 @@ actor WidgetSnapshotPublisher: WidgetSnapshotPublishing {
             return .unavailable("小组件共享不可用")
         }
     }
+
+    func publishRebuilding(now: Date) async -> WidgetSharingStatus {
+        let request = registerRequest(now: now)
+
+        do {
+            let existing = try store.read()
+            guard newestRequest == request else { return .ready(now) }
+            let snapshot = existing?.replacingState(
+                .rebuilding(lastSuccessfulAt: existing?.reliableLastSuccessfulAt)
+            ) ?? WidgetUsageSnapshot(
+                generatedAt: now,
+                todayTokens: 0,
+                allTimeTokens: 0,
+                fiveHourLimit: nil,
+                weekLimit: nil,
+                projects: [],
+                state: .rebuilding(lastSuccessfulAt: nil)
+            )
+            let fingerprint = WidgetSnapshotFingerprint(snapshot)
+            try store.write(snapshot)
+            if fingerprint != lastFingerprint {
+                reloader.reloadUsageWidget()
+                lastFingerprint = fingerprint
+            }
+            return .ready(now)
+        } catch {
+            guard newestRequest == request else { return .ready(now) }
+            return .unavailable("小组件共享不可用")
+        }
+    }
+
+    private func registerRequest(now: Date) -> WidgetPublicationRequest {
+        requestSequence &+= 1
+        let request = WidgetPublicationRequest(now: now, sequence: requestSequence)
+        if let newestRequest {
+            if request.isNewer(than: newestRequest) {
+                self.newestRequest = request
+            }
+        } else {
+            newestRequest = request
+        }
+        return request
+    }
 }
 
 struct UnavailableWidgetSnapshotPublisher: WidgetSnapshotPublishing {
     let message: String
 
     func publish(now: Date, calendar: Calendar) async -> WidgetSharingStatus {
+        .unavailable(message)
+    }
+
+    func publishRebuilding(now: Date) async -> WidgetSharingStatus {
         .unavailable(message)
     }
 }
@@ -146,6 +186,31 @@ private struct WidgetPublicationRequest: Equatable, Sendable {
 }
 
 private extension WidgetUsageSnapshot {
+    var reliableLastSuccessfulAt: Date? {
+        switch state {
+        case let .fresh(lastSuccessfulAt),
+             let .partial(lastSuccessfulAt, _),
+             let .stale(lastSuccessfulAt):
+            lastSuccessfulAt
+        case let .rebuilding(lastSuccessfulAt):
+            lastSuccessfulAt
+        case .noData, .failed:
+            nil
+        }
+    }
+
+    func replacingState(_ state: WidgetDataState) -> Self {
+        Self(
+            generatedAt: generatedAt,
+            todayTokens: todayTokens,
+            allTimeTokens: allTimeTokens,
+            fiveHourLimit: fiveHourLimit,
+            weekLimit: weekLimit,
+            projects: projects,
+            state: state
+        )
+    }
+
     static func project(
         today: DashboardSnapshot,
         all: DashboardSnapshot,
