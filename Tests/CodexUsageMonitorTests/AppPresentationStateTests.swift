@@ -178,6 +178,42 @@ struct AppPresentationStateTests {
     }
 
     @MainActor
+    @Test func widgetSharingRecoveryClearsOnlyItsOwnErrorState() async {
+        let launchAtLogin = LaunchAtLoginServiceSpy(
+            enabled: false,
+            enableFailure: "无法启用登录启动"
+        )
+        let notificationSender = PresentationNotificationSenderSpy(
+            enabled: false,
+            authorizationResults: [false]
+        )
+        let state = SettingsViewState(
+            launchAtLogin: launchAtLogin,
+            notificationSender: notificationSender
+        )
+        state.setLaunchAtLoginEnabled(true)
+        await state.setNotificationsEnabled(true)
+
+        #expect(state.launchAtLoginError == "无法启用登录启动")
+        #expect(state.notificationMessage == "未授予通知权限")
+
+        state.setWidgetSharingStatus(.unavailable("小组件共享不可用"))
+        #expect(state.widgetSharingMessage == "小组件共享不可用")
+        #expect(state.launchAtLoginError == "无法启用登录启动")
+        #expect(state.notificationMessage == "未授予通知权限")
+
+        state.setWidgetSharingStatus(.ready(Date(timeIntervalSince1970: 1_000)))
+        #expect(state.widgetSharingMessage == nil)
+        #expect(state.launchAtLoginError == "无法启用登录启动")
+        #expect(state.notificationMessage == "未授予通知权限")
+
+        state.setWidgetSharingStatus(nil)
+        #expect(state.widgetSharingMessage == nil)
+        #expect(state.launchAtLoginError == "无法启用登录启动")
+        #expect(state.notificationMessage == "未授予通知权限")
+    }
+
+    @MainActor
     @Test func successfulLaunchAtLoginChangeClearsPreviousError() {
         let service = LaunchAtLoginServiceSpy(enabled: false, enableFailure: "首次失败")
         let state = SettingsViewState(
