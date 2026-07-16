@@ -214,10 +214,9 @@ struct EndToEndIngestionTests {
         let fixture = try EndToEndFixture()
         defer { fixture.remove() }
         let logURL = fixture.sessionsRoot.appending(path: "session-truncated.jsonl")
-        let fixtureURL = try #require(Bundle.module.url(
+        let fixtureURL = try #require(TestResourceBundle.fixtureURL(
             forResource: "session-truncated",
-            withExtension: "jsonl",
-            subdirectory: "Fixtures"
+            withExtension: "jsonl"
         ))
         let contents = try String(contentsOf: fixtureURL, encoding: .utf8)
             .trimmingCharacters(in: .newlines)

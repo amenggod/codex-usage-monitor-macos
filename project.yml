@@ -21,6 +21,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Shared
         GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "2"
   CodexUsageMonitor:
     type: application
     platform: macOS
@@ -52,6 +54,7 @@ targets:
       base:
         PRODUCT_NAME: Codex Usage Monitor
         EXECUTABLE_NAME: CodexUsageMonitor
+        PRODUCT_MODULE_NAME: CodexUsageMonitor
         PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor
     dependencies:
       - target: CodexUsageShared
@@ -127,9 +130,25 @@ targets:
       - path: Tests/CodexUsageMonitorTests
         excludes: [Fixtures]
       - path: Tests/CodexUsageSharedTests
-    resources: [Tests/CodexUsageMonitorTests/Fixtures]
+      - path: Tests/CodexUsageMonitorTests/Fixtures
+        buildPhase: resources
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: ""
+        BUNDLE_LOADER: ""
+        LD_RUNPATH_SEARCH_PATHS: '$(inherited) "@loader_path/../../../Codex Usage Monitor.app/Contents/MacOS"'
+        OTHER_LDFLAGS: '$(inherited) "$(BUILT_PRODUCTS_DIR)/Codex Usage Monitor.app/Contents/MacOS/CodexUsageMonitor.debug.dylib"'
     dependencies:
       - target: CodexUsageMonitor
       - target: CodexUsageShared
       - package: SwiftTesting
         product: Testing
+schemes:
+  CodexUsageMonitorTests:
+    build:
+      targets:
+        CodexUsageMonitorTests: [test]
+    test:
+      targets:
+        - CodexUsageMonitorTests

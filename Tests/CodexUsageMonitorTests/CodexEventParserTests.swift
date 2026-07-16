@@ -73,10 +73,9 @@ struct CodexEventParserTests {
 
     @Test
     func parsesTokenAndBothKnownLimitWindows() throws {
-        let url = try #require(Bundle.module.url(
+        let url = try #require(TestResourceBundle.fixtureURL(
             forResource: "session-sample",
-            withExtension: "jsonl",
-            subdirectory: "Fixtures"
+            withExtension: "jsonl"
         ))
         let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n")
         let event = try #require(parser.parse(line: Data(lines[1].utf8)))
