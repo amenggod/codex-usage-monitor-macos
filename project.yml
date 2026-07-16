@@ -20,6 +20,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Shared
+        GENERATE_INFOPLIST_FILE: YES
   CodexUsageMonitor:
     type: application
     platform: macOS
@@ -61,6 +62,7 @@ targets:
         link: false
     postBuildScripts:
       - name: Embed Login Item
+        basedOnDependencyAnalysis: false
         script: |
           set -euo pipefail
           destination="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LoginItems"
@@ -101,6 +103,8 @@ targets:
     type: application
     platform: macOS
     sources: [Sources/CodexUsageMonitorLoginItem]
+    dependencies:
+      - target: CodexUsageShared
     info:
       path: Config/LoginItem-Info.plist
       properties:

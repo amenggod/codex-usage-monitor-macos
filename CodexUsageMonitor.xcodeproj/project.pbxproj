@@ -29,6 +29,7 @@
 		4BDECB625B4B7C03D1496D69 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0893BF6FD01EEA23BDAB3B9 /* SettingsView.swift */; };
 		4E214D7C07F64F0E0A3A8A3D /* WidgetUsageSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EC328C1719DADED74DF8AA6 /* WidgetUsageSnapshot.swift */; };
 		4E83E99BED1FD0475971DC8F /* TokenEventIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578B5D2055953F593D5FADBA /* TokenEventIdentityTests.swift */; };
+		50919068B20EBFFEBED1F647 /* CodexUsageShared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A0E86976FB9BE16C5A7A0FE4 /* CodexUsageShared.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		56AC9A8C226DF5B60E86D870 /* CodexEventParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B563BBD75DC21206C771A6C0 /* CodexEventParser.swift */; };
 		57F19A1CB3002A6D82460E97 /* NotificationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8EAD05856E3A439F613EE59 /* NotificationCoordinator.swift */; };
 		5A8DDEC1402913C9C17612E2 /* TokenEventIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE4B59A7EEB11B4FB3DBFD93 /* TokenEventIdentity.swift */; };
@@ -63,6 +64,7 @@
 		D395A522BFBB1E0EBFC75F2A /* LaunchAtLoginController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 771A2B4D7AC43FAC449E2A89 /* LaunchAtLoginController.swift */; };
 		D47D39D7F6FF6241E3C5C9FE /* LimitAvailabilityPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 491F71F7E310E7F8CBC02E4E /* LimitAvailabilityPolicyTests.swift */; };
 		D6C5F7DED14429AD63165670 /* WidgetSnapshotPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96E2FA8DBBD5AFAE092B9ECB /* WidgetSnapshotPublisher.swift */; };
+		D748FFD809AF42FA1778D8D7 /* CodexUsageShared.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A0E86976FB9BE16C5A7A0FE4 /* CodexUsageShared.framework */; };
 		D7601F3E61E993342A93DEF8 /* UsagePresentationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4980409024A79B454DE6D69 /* UsagePresentationPolicy.swift */; };
 		D9413E67CD0CBB29386C6AF6 /* TokenDeltaCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39D4B1C6F77A73D6B2723674 /* TokenDeltaCalculatorTests.swift */; };
 		D9CA248B0EF17C0E4E302A6E /* LoginItemMainApplicationLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1234F98AAE06E6692AA35548 /* LoginItemMainApplicationLocator.swift */; };
@@ -106,6 +108,13 @@
 			remoteGlobalIDString = 9BA12909D1A9289DDD4CAC0B;
 			remoteInfo = CodexUsageShared;
 		};
+		7F64E8041B1CC69A0E7C478E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = EAF5D249B4B6E10991D25E9F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9BA12909D1A9289DDD4CAC0B;
+			remoteInfo = CodexUsageShared;
+		};
 		927172FFB47FE5F7C19FE457 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = EAF5D249B4B6E10991D25E9F /* Project object */;
@@ -132,6 +141,17 @@
 				221ECC926A2300C0E1C7E67C /* CodexUsageMonitorWidget.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		60FD9EECE084075C7467635D /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				50919068B20EBFFEBED1F647 /* CodexUsageShared.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		8BF611014ED2E52A7767A053 /* Embed Frameworks */ = {
@@ -250,6 +270,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				798863E7A2B2C2A49B1A1A38 /* CodexUsageShared.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A8C359B1D6EB7DC4A6F500C1 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D748FFD809AF42FA1778D8D7 /* CodexUsageShared.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -553,10 +581,13 @@
 			buildConfigurationList = A6F223092E9C6D79CB07B4AE /* Build configuration list for PBXNativeTarget "CodexUsageMonitorLoginItem" */;
 			buildPhases = (
 				11C0068E321731FBF810E633 /* Sources */,
+				A8C359B1D6EB7DC4A6F500C1 /* Frameworks */,
+				60FD9EECE084075C7467635D /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				68461CD74BE79CDEFCFBEB68 /* PBXTargetDependency */,
 			);
 			name = CodexUsageMonitorLoginItem;
 			packageProductDependencies = (
@@ -622,6 +653,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		FC78F6AA3532751AD6ABDCD0 /* Embed Login Item */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -765,6 +797,11 @@
 			target = 55102631EDC564024C18D8A3 /* CodexUsageMonitorWidget */;
 			targetProxy = 68878C023538A3D7A389B9F2 /* PBXContainerItemProxy */;
 		};
+		68461CD74BE79CDEFCFBEB68 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9BA12909D1A9289DDD4CAC0B /* CodexUsageShared */;
+			targetProxy = 7F64E8041B1CC69A0E7C478E /* PBXContainerItemProxy */;
+		};
 		9C290859BE7201BC3AC70BB1 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 9BA12909D1A9289DDD4CAC0B /* CodexUsageShared */;
@@ -853,6 +890,7 @@
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -986,6 +1024,7 @@
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
