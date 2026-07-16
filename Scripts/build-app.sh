@@ -54,7 +54,9 @@ ditto "$SOURCE_APP" "$APP"
 if [[ "$SIGNING_ALLOWED" == "NO" ]]; then
   mkdir -p "$APP/Contents/Resources"
   printf '%s\n' \
-    "UNSIGNED BUILD — compilation and bundle-structure verification only." \
+    "UNSIGNED VALIDATION BUILD — compilation and bundle-structure verification only." \
+    "This artifact has no bundle resource seal or identity-backed signature." \
+    "Mach-O executables may carry ad-hoc or linker signatures." \
     "This artifact is not an installable, notarized release." \
     > "$APP/Contents/Resources/UNSIGNED_BUILD.txt"
 fi
@@ -63,7 +65,8 @@ bash Scripts/verify-bundle.sh "$APP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
 if [[ "$SIGNING_ALLOWED" == "NO" ]]; then
-  echo "WARNING: unsigned build; not an installable or notarized release." >&2
+  echo "WARNING: validation artifact has no bundle resource seal or identity-backed signature." >&2
+  echo "Mach-O executables may carry ad-hoc or linker signatures; this is not an installable or notarized release." >&2
 fi
 echo "$APP"
 echo "$ZIP"

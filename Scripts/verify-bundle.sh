@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APP="${1:?usage: verify-bundle.sh /path/to/app}"
+CODESIGN_BIN="${CODESIGN_BIN:-/usr/bin/codesign}"
 
 fail() {
   echo "bundle verification failed: $*" >&2
@@ -42,6 +43,44 @@ assert_unique_bundle() {
   count="$(find "$root" -type d -name "$name" -print | wc -l | tr -d '[:space:]')"
   [[ "$count" == "1" ]] || fail "expected one $name under $root (found $count)"
   require_directory "$expected_path"
+}
+
+verify_signed_code() {
+  local path="$1"
+  local details
+  local team_identifier
+
+  "$CODESIGN_BIN" --verify --strict "$path" >/dev/null 2>&1 ||
+    fail "invalid signature: $path"
+  "$CODESIGN_BIN" \
+    --verify \
+    --strict \
+    -R '=anchor apple generic' \
+    "$path" \
+    >/dev/null 2>&1 ||
+    fail "signature is not anchored by Apple: $path"
+
+  details="$("$CODESIGN_BIN" -dvvv "$path" 2>&1)" ||
+    fail "unable to inspect signature: $path"
+  grep -q '^Authority=' <<<"$details" ||
+    fail "signature is ad-hoc or lacks an identity: $path"
+  if grep -q '^Signature=adhoc' <<<"$details"; then
+    fail "ad-hoc signature is not distributable: $path"
+  fi
+
+  team_identifier="$(
+    sed -n 's/^TeamIdentifier=//p' <<<"$details" |
+      head -n 1
+  )"
+  [[ -n "$team_identifier" && "$team_identifier" != "not set" ]] ||
+    fail "missing TeamIdentifier: $path"
+
+  if [[ -z "${EXPECTED_TEAM_IDENTIFIER:-}" ]]; then
+    EXPECTED_TEAM_IDENTIFIER="$team_identifier"
+  elif [[ "$team_identifier" != "$EXPECTED_TEAM_IDENTIFIER" ]]; then
+    fail \
+      "TeamIdentifier mismatch for $path: $team_identifier (expected $EXPECTED_TEAM_IDENTIFIER)"
+  fi
 }
 
 require_directory "$APP"
@@ -160,27 +199,58 @@ done
 
 UNSIGNED_MARKER="$APP/Contents/Resources/UNSIGNED_BUILD.txt"
 if [[ -f "$UNSIGNED_MARKER" ]]; then
-  grep -q '^UNSIGNED BUILD' "$UNSIGNED_MARKER" ||
+  grep -q '^UNSIGNED VALIDATION BUILD' "$UNSIGNED_MARKER" ||
     fail "invalid unsigned-build marker"
+  grep -q 'no bundle resource seal or identity-backed signature' "$UNSIGNED_MARKER" ||
+    fail "unsigned-build marker misstates signing coverage"
+  grep -q 'Mach-O executables may carry ad-hoc or linker signatures' "$UNSIGNED_MARKER" ||
+    fail "unsigned-build marker misstates executable signatures"
   grep -q 'not an installable, notarized release' "$UNSIGNED_MARKER" ||
     fail "unsigned-build marker lacks distribution warning"
-  signature_count="$(
-    find "$APP" -type d -name _CodeSignature -print |
+  resource_seal_count="$(
+    find "$APP" -type f -path '*/_CodeSignature/CodeResources' -print |
       wc -l |
       tr -d '[:space:]'
   )"
-  [[ "$signature_count" == "0" ]] ||
-    fail "unsigned build unexpectedly contains code signatures"
-  if codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
-    fail "unsigned build unexpectedly passes signature verification"
-  fi
-  echo "Bundle structure verified: unsigned build only; not installable or notarized."
+  [[ "$resource_seal_count" == "0" ]] ||
+    fail "validation artifact unexpectedly contains bundle resource seals"
+  validation_executables=(
+    "$APP/Contents/MacOS/CodexUsageMonitor"
+    "$WIDGET/Contents/MacOS/CodexUsageMonitorWidget"
+    "$LOGIN_ITEM/Contents/MacOS/CodexUsageMonitorLoginItem"
+    "$SHARED_FRAMEWORK/CodexUsageShared"
+    "$LOGIN_SHARED_FRAMEWORK/CodexUsageShared"
+  )
+  for path in "${validation_executables[@]}"; do
+    if "$CODESIGN_BIN" \
+      --verify \
+      --strict \
+      -R '=anchor apple generic' \
+      "$path" \
+      >/dev/null 2>&1
+    then
+      fail "validation artifact unexpectedly contains Apple identity-backed code: $path"
+    fi
+  done
+  echo "Bundle structure verified: no bundle resource seal or identity-backed signature."
+  echo "Mach-O executables may carry ad-hoc or linker signatures; artifact is not installable or notarized."
 else
-  codesign --verify --deep --strict "$APP" >/dev/null 2>&1 ||
-    fail "bundle is unsigned or has an invalid signature and lacks the unsigned marker"
-  signature_details="$(codesign -dvv "$APP" 2>&1)" ||
-    fail "unable to inspect bundle signature"
-  grep -q '^Authority=' <<<"$signature_details" ||
-    fail "ad-hoc signatures are not accepted as distributable signing"
-  echo "Bundle structure and identity-backed signature verified."
+  EXPECTED_TEAM_IDENTIFIER=""
+  signed_paths=(
+    "$APP"
+    "$APP/Contents/MacOS/CodexUsageMonitor"
+    "$WIDGET"
+    "$WIDGET/Contents/MacOS/CodexUsageMonitorWidget"
+    "$LOGIN_ITEM"
+    "$LOGIN_ITEM/Contents/MacOS/CodexUsageMonitorLoginItem"
+    "$SHARED_FRAMEWORK"
+    "$SHARED_FRAMEWORK/CodexUsageShared"
+    "$LOGIN_SHARED_FRAMEWORK"
+    "$LOGIN_SHARED_FRAMEWORK/CodexUsageShared"
+  )
+  for path in "${signed_paths[@]}"; do
+    verify_signed_code "$path"
+  done
+  echo \
+    "Bundle structure and Apple identity-backed signatures verified for team $EXPECTED_TEAM_IDENTIFIER."
 fi
