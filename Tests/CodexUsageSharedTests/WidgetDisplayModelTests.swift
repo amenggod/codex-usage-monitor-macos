@@ -6,6 +6,164 @@ import Testing
 struct WidgetDisplayModelTests {
     private let testNow = Date(timeIntervalSince1970: 10_000)
 
+    @Test func smallPresentationContainsTodayWeekAndFreshnessOnly() {
+        let model = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                fiveHourLimit: .fixture(
+                    resetsAt: testNow.addingTimeInterval(3_600)
+                ),
+                weekLimit: .fixture(
+                    resetsAt: testNow.addingTimeInterval(86_400)
+                )
+            ),
+            now: testNow
+        )
+
+        #expect(model.small.todayTokens == 12_345)
+        #expect(model.small.weekRemainingPercent == 72)
+        #expect(model.small.statusText.hasPrefix("更新于"))
+        #expect(model.small.projects.isEmpty)
+    }
+
+    @Test func mediumPresentationContainsTotalsLimitsAndThreeProjects() {
+        let model = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                fiveHourLimit: .fixture(
+                    resetsAt: testNow.addingTimeInterval(3_600)
+                ),
+                weekLimit: .fixture(
+                    resetsAt: testNow.addingTimeInterval(86_400)
+                )
+            ),
+            now: testNow
+        )
+
+        #expect(model.medium.todayTokens == 12_345)
+        #expect(model.medium.allTimeTokens == 98_765)
+        #expect(model.medium.fiveHourRemainingPercent == 72)
+        #expect(model.medium.weekRemainingPercent == 72)
+        #expect(model.medium.projects.count == 3)
+        #expect(!model.medium.usesExpandedWeekLayout)
+    }
+
+    @Test func mediumPresentationReflowsWhenFiveHourLimitIsMissing() {
+        let model = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                fiveHourLimit: nil,
+                weekLimit: .fixture(
+                    resetsAt: testNow.addingTimeInterval(86_400)
+                )
+            ),
+            now: testNow
+        )
+
+        #expect(model.medium.fiveHourRemainingPercent == nil)
+        #expect(model.medium.projects.count == 3)
+        #expect(model.medium.usesExpandedWeekLayout)
+    }
+
+    @Test func mediumPresentationReflowsWhenFiveHourLimitIsExpired() {
+        let model = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                fiveHourLimit: .fixture(resetsAt: testNow),
+                weekLimit: .fixture(
+                    resetsAt: testNow.addingTimeInterval(86_400)
+                )
+            ),
+            now: testNow
+        )
+
+        #expect(model.medium.fiveHourRemainingPercent == nil)
+        #expect(model.medium.usesExpandedWeekLayout)
+    }
+
+    @Test func widgetFormattingIsDeterministicForTokensAndPercents() {
+        let locale = Locale(identifier: "en_US_POSIX")
+
+        #expect(
+            WidgetDisplayFormatting.compactTokens(12_345, locale: locale) == "12K"
+        )
+        #expect(WidgetDisplayFormatting.percent(71.6) == "72%")
+    }
+
+    @Test func stateStatusUsesLastSuccessfulTimeInsteadOfPublicationTime() {
+        let lastSuccessfulAt = testNow.addingTimeInterval(-3_600)
+        let generatedAt = testNow.addingTimeInterval(-60)
+        let timeText = lastSuccessfulAt.formatted(
+            date: .omitted,
+            time: .shortened
+        )
+
+        let stale = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: generatedAt,
+                state: .stale(lastSuccessfulAt: lastSuccessfulAt)
+            ),
+            now: testNow
+        )
+        let partial = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: generatedAt,
+                state: .partial(
+                    lastSuccessfulAt: lastSuccessfulAt,
+                    failedFiles: 2
+                )
+            ),
+            now: testNow
+        )
+
+        #expect(stale.statusText == "数据可能已过期 · \(timeText)")
+        #expect(partial.statusText == "部分数据 · \(timeText) · 2 个文件")
+    }
+
+    @Test func unavailableDataStatesNeverExposeNumericUsageValues() {
+        let noData = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                todayTokens: 0,
+                state: .noData
+            ),
+            now: testNow
+        )
+        let failed = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                todayTokens: 0,
+                state: .failed
+            ),
+            now: testNow
+        )
+        let rebuildingWithoutData = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                todayTokens: 0,
+                state: .rebuilding(lastSuccessfulAt: nil)
+            ),
+            now: testNow
+        )
+        let rebuildingWithData = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                state: .rebuilding(
+                    lastSuccessfulAt: testNow.addingTimeInterval(-60)
+                )
+            ),
+            now: testNow
+        )
+
+        #expect(!noData.canDisplayUsageValues)
+        #expect(!failed.canDisplayUsageValues)
+        #expect(!rebuildingWithoutData.canDisplayUsageValues)
+        #expect(rebuildingWithData.canDisplayUsageValues)
+        #expect(noData.statusText == "尚无本地用量数据")
+        #expect(failed.statusText == "读取失败，等待主程序重新同步")
+        #expect(rebuildingWithoutData.statusText == "正在重建 · 尚无可用数据")
+    }
+
     @Test func expiredFiveHourLimitIsRemovedWithoutRemovingWeek() {
         let model = WidgetDisplayModel(
             snapshot: .fixture(

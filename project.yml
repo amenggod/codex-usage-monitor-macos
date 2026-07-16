@@ -102,6 +102,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Widget
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WIDGET_EXTENSION
   CodexUsageMonitorLoginItem:
     type: application
     platform: macOS
@@ -130,6 +131,8 @@ targets:
       - path: Tests/CodexUsageMonitorTests
         excludes: [Fixtures]
       - path: Tests/CodexUsageSharedTests
+      - path: Tests/CodexUsageMonitorWidgetTests
+      - path: Sources/CodexUsageMonitorWidget
       - path: Tests/CodexUsageMonitorTests/Fixtures
         buildPhase: resources
     settings:

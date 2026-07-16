@@ -32,6 +32,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "CodexUsageShared"),
+        .target(
+            name: "CodexUsageMonitorWidget",
+            dependencies: ["CodexUsageShared"]
+        ),
         .executableTarget(
             name: "CodexUsageMonitor",
             dependencies: ["CodexUsageShared"],
@@ -50,6 +54,15 @@ let package = Package(
         .testTarget(
             name: "CodexUsageSharedTests",
             dependencies: [
+                "CodexUsageShared",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
+            linkerSettings: testingLinkerSettings
+        ),
+        .testTarget(
+            name: "CodexUsageMonitorWidgetTests",
+            dependencies: [
+                "CodexUsageMonitorWidget",
                 "CodexUsageShared",
                 .product(name: "Testing", package: "swift-testing"),
             ],
