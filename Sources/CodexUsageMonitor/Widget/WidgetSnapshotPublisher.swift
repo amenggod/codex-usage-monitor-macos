@@ -144,7 +144,7 @@ private struct WidgetSnapshotFingerprint: Equatable, Sendable {
     let allTimeTokens: Int64
     let fiveHourLimit: WidgetLimitStatus?
     let weekLimit: WidgetLimitStatus?
-    let limitFreshness: WidgetLimitFreshness
+    let limitFreshnessKind: WidgetLimitFreshnessKind
     let projects: [WidgetProjectUsage]
     let stateKind: String
     let failedFiles: Int?
@@ -154,7 +154,7 @@ private struct WidgetSnapshotFingerprint: Equatable, Sendable {
         allTimeTokens = snapshot.allTimeTokens
         fiveHourLimit = snapshot.fiveHourLimit
         weekLimit = snapshot.weekLimit
-        limitFreshness = snapshot.limitFreshness
+        limitFreshnessKind = WidgetLimitFreshnessKind(snapshot.limitFreshness)
         projects = snapshot.projects
         switch snapshot.state {
         case .fresh:
@@ -175,6 +175,23 @@ private struct WidgetSnapshotFingerprint: Equatable, Sendable {
         case .failed:
             stateKind = "failed"
             failedFiles = nil
+        }
+    }
+}
+
+private enum WidgetLimitFreshnessKind: Equatable, Sendable {
+    case fresh
+    case stale
+    case unavailable
+
+    init(_ freshness: WidgetLimitFreshness) {
+        switch freshness {
+        case .fresh:
+            self = .fresh
+        case .stale:
+            self = .stale
+        case .unavailable:
+            self = .unavailable
         }
     }
 }
