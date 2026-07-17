@@ -6,12 +6,12 @@ import Testing
 @Suite("MenuBarFormattingTests")
 struct MenuBarFormattingTests {
     @MainActor
-    @Test func menuBarLabelUsesATemplateImageForWallpaperContrast() {
+    @Test func menuBarLabelUsesACompactTemplateImageForCrowdedMenuBars() {
         let image = MenuBarFormatter.templateImage(title: "周 62%")
 
         #expect(image.isTemplate)
         #expect(image.size.height == 18)
-        #expect(image.size.width > 30)
+        #expect(image.size.width <= 18)
     }
 
     @Test func freshnessSymbolsRemainAvailableForEveryState() {

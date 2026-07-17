@@ -7,7 +7,7 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "0.2.3"
-    CURRENT_PROJECT_VERSION: "7"
+    CURRENT_PROJECT_VERSION: "9"
 packages:
   SwiftTesting:
     url: https://github.com/swiftlang/swift-testing.git
@@ -22,7 +22,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Shared
         GENERATE_INFOPLIST_FILE: YES
         MARKETING_VERSION: "0.2.3"
-        CURRENT_PROJECT_VERSION: "7"
+        CURRENT_PROJECT_VERSION: "9"
   CodexUsageMonitor:
     type: application
     platform: macOS

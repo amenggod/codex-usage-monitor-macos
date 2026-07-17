@@ -25,7 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func startRetainedMenuBarController() {
-        menuBarController?.start()
+        DispatchQueue.main.async { [weak self] in
+            self?.menuBarController?.start()
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

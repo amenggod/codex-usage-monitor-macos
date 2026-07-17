@@ -26,12 +26,20 @@ struct AppLaunchCoordinatorTests {
     }
 
     @MainActor
-    @Test func appDelegateStartsNativeMenuBarAfterApplicationLaunch() {
+    @Test func appDelegateDefersNativeMenuBarUntilAfterApplicationLaunchReturns() async {
         let delegate = AppDelegate()
         let menuBar = MenuBarControllerSpy()
 
         delegate.retainMenuBarController(menuBar)
         delegate.startRetainedMenuBarController()
+
+        #expect(menuBar.startCount == 0)
+
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                continuation.resume()
+            }
+        }
 
         #expect(menuBar.startCount == 1)
     }
