@@ -4,6 +4,21 @@ import Testing
 
 @Suite("WidgetUsageSnapshotTests")
 struct WidgetUsageSnapshotTests {
+    @Test func schemaTwoCarriesLimitFreshness() throws {
+        let observedAt = Date(timeIntervalSince1970: 900)
+        let snapshot = WidgetUsageSnapshot.fixture(
+            generatedAt: Date(timeIntervalSince1970: 1_000),
+            limitFreshness: .fresh(observedAt: observedAt)
+        )
+        let decoded = try JSONDecoder.widgetSnapshot.decode(
+            WidgetUsageSnapshot.self,
+            from: JSONEncoder.widgetSnapshot.encode(snapshot)
+        )
+
+        #expect(snapshot.schemaVersion == 2)
+        #expect(decoded.limitFreshness == .fresh(observedAt: observedAt))
+    }
+
     @Test func appGroupUsesTheSigningTeamPrefixRequiredByMacOS() {
         let teamIdentifier = "ZD9PK3NY5Z"
 
@@ -81,6 +96,7 @@ private enum WidgetSnapshotJSONNode {
     case project
     case state(WidgetDataState)
     case statePayload(WidgetDataState)
+    case limitFreshness(WidgetLimitFreshness)
 }
 
 private func assertWidgetSnapshotJSONUsesPrivacyWhitelist(
@@ -104,6 +120,7 @@ private func assertWidgetSnapshotJSONUsesPrivacyWhitelist(
             "allTimeTokens",
             "projects",
             "state",
+            "limitFreshness",
         ]
         if snapshot.fiveHourLimit != nil {
             expectedKeys.insert("fiveHourLimit")
@@ -139,6 +156,10 @@ private func assertWidgetSnapshotJSONUsesPrivacyWhitelist(
         try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
             try #require(object["state"]),
             node: .state(snapshot.state)
+        )
+        try assertWidgetSnapshotJSONUsesPrivacyWhitelist(
+            try #require(object["limitFreshness"]),
+            node: .limitFreshness(snapshot.limitFreshness)
         )
 
     case .limit:
@@ -200,6 +221,17 @@ private func assertWidgetSnapshotJSONUsesPrivacyWhitelist(
         #expect(Set(object.keys) == allowedKeys)
         for key in object.keys {
             try assertJSONScalar(try #require(object[key]))
+        }
+
+    case let .limitFreshness(freshness):
+        let object = try #require(value as? [String: Any])
+        switch freshness {
+        case .fresh:
+            #expect(Set(object.keys) == ["fresh"])
+        case .stale:
+            #expect(Set(object.keys) == ["stale"])
+        case .unavailable:
+            #expect(Set(object.keys) == ["unavailable"])
         }
     }
 }

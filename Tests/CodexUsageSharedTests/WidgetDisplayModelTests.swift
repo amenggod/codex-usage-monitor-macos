@@ -6,6 +6,53 @@ import Testing
 struct WidgetDisplayModelTests {
     private let testNow = Date(timeIntervalSince1970: 10_000)
 
+    @Test func unavailableLiveLimitsHidePercentagesWithoutHidingTokens() {
+        let model = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                fiveHourLimit: .fixture(resetsAt: testNow.addingTimeInterval(3_600)),
+                weekLimit: .fixture(resetsAt: testNow.addingTimeInterval(86_400)),
+                limitFreshness: .unavailable
+            ),
+            now: testNow
+        )
+
+        #expect(model.todayTokens == 12_345)
+        #expect(model.visibleFiveHourLimit == nil)
+        #expect(model.visibleWeekLimit == nil)
+        #expect(model.statusText == "实时限额不可用")
+    }
+
+    @Test func staleLiveLimitsShowTheirLastSynchronizationTime() {
+        let observedAt = testNow.addingTimeInterval(-900)
+        let model = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                weekLimit: .fixture(resetsAt: testNow.addingTimeInterval(86_400)),
+                limitFreshness: .stale(observedAt: observedAt)
+            ),
+            now: testNow
+        )
+
+        #expect(model.visibleWeekLimit != nil)
+        #expect(model.statusText == "上次实时同步 \(observedAt.formatted(date: .omitted, time: .shortened))")
+    }
+
+    @Test func liveLimitsOlderThanThirtyMinutesAreHiddenByTheWidgetTimeline() {
+        let observedAt = testNow.addingTimeInterval(-1_801)
+        let model = WidgetDisplayModel(
+            snapshot: .fixture(
+                generatedAt: testNow,
+                weekLimit: .fixture(resetsAt: testNow.addingTimeInterval(86_400)),
+                limitFreshness: .stale(observedAt: observedAt)
+            ),
+            now: testNow
+        )
+
+        #expect(model.visibleWeekLimit == nil)
+        #expect(model.statusText == "实时限额不可用")
+    }
+
     @Test func smallPresentationContainsTodayWeekAndFreshnessOnly() {
         let model = WidgetDisplayModel(
             snapshot: .fixture(
@@ -193,7 +240,8 @@ struct WidgetDisplayModelTests {
     @Test func snapshotOlderThanFifteenMinutesKeepsValuesAndShowsLastUpdate() {
         let snapshot = WidgetUsageSnapshot.fixture(
             generatedAt: testNow.addingTimeInterval(-901),
-            todayTokens: 42
+            todayTokens: 42,
+            limitFreshness: .fresh(observedAt: testNow)
         )
         let model = WidgetDisplayModel(snapshot: snapshot, now: testNow)
 
@@ -204,7 +252,8 @@ struct WidgetDisplayModelTests {
 
     @Test func snapshotAtFifteenMinuteBoundaryIsStillFresh() {
         let snapshot = WidgetUsageSnapshot.fixture(
-            generatedAt: testNow.addingTimeInterval(-900)
+            generatedAt: testNow.addingTimeInterval(-900),
+            limitFreshness: .fresh(observedAt: testNow)
         )
         let model = WidgetDisplayModel(snapshot: snapshot, now: testNow)
 

@@ -48,6 +48,35 @@ struct WidgetSnapshotPublisherTests {
         #expect(reloader.reloadCount == 1)
     }
 
+    @Test func publisherWritesSixtyNinePercentWithFreshObservationTime() async throws {
+        let observedAt = testNow.addingTimeInterval(-30)
+        let week = LimitStatus(
+            window: .week,
+            usedPercent: 31,
+            resetsAt: testNow.addingTimeInterval(86_400)
+        )
+        let store = WidgetStoreSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([
+                makeSnapshot(
+                    range: .today,
+                    total: 12,
+                    projects: [],
+                    limits: [week],
+                    limitFreshness: .fresh(observedAt)
+                ),
+                makeSnapshot(range: .all, total: 100, projects: []),
+            ]),
+            store: store,
+            reloader: WidgetReloaderSpy()
+        )
+
+        _ = await publisher.publish(now: testNow, calendar: testCalendar)
+
+        #expect(store.lastSnapshot?.weekLimit?.remainingPercent == 69)
+        #expect(store.lastSnapshot?.limitFreshness == .fresh(observedAt: observedAt))
+    }
+
     @Test func identicalVisibleValuesWriteFreshTimeButReloadOnlyOnce() async {
         let today = makeSnapshot(range: .today, total: 12, projects: [])
         let all = makeSnapshot(range: .all, total: 100, projects: [])
@@ -506,7 +535,8 @@ private func makeSnapshot(
     total: Int64,
     projects: [ProjectUsage],
     limits: [LimitStatus]? = nil,
-    freshness: DataFreshness = .fresh(testNow)
+    freshness: DataFreshness = .fresh(testNow),
+    limitFreshness: LimitDataFreshness = .fresh(testNow)
 ) -> DashboardSnapshot {
     DashboardSnapshot(
         range: range,
@@ -525,7 +555,8 @@ private func makeSnapshot(
                 resetsAt: testNow.addingTimeInterval(86_400)
             )
         ],
-        freshness: freshness
+        freshness: freshness,
+        limitFreshness: limitFreshness
     )
 }
 
@@ -557,6 +588,7 @@ private func makeStoredWidgetSnapshot(
             remainingPercent: 72,
             resetsAt: testNow.addingTimeInterval(86_400)
         ),
+        limitFreshness: .fresh(observedAt: generatedAt),
         projects: [
             WidgetProjectUsage(id: "project", name: "Project", tokens: 80)
         ],

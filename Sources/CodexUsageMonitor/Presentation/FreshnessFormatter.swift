@@ -37,3 +37,24 @@ enum FreshnessFormatter {
         }
     }
 }
+
+enum LimitFreshnessFormatter {
+    static func text(for freshness: LimitDataFreshness) -> String {
+        switch freshness {
+        case let .fresh(date):
+            "实时限额更新于 \(date.formatted(date: .omitted, time: .shortened))"
+        case let .stale(date):
+            "上次实时同步 \(date.formatted(date: .omitted, time: .shortened))"
+        case let .unavailable(_, message):
+            "实时限额不可用：\(message)"
+        }
+    }
+
+    static func symbol(for freshness: LimitDataFreshness) -> String {
+        switch freshness {
+        case .fresh: "bolt.horizontal.circle"
+        case .stale: "clock.badge.exclamationmark"
+        case .unavailable: "exclamationmark.triangle"
+        }
+    }
+}

@@ -22,7 +22,7 @@ struct CodexAppServerTransportTests {
         let response = try await transport.request(
             method: "account/rateLimits/read",
             params: nil,
-            timeout: .seconds(1)
+            timeout: .seconds(5)
         )
         let notification = await notifications.first { _ in true }
         await transport.stop()

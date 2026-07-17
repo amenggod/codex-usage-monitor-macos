@@ -1,13 +1,14 @@
 import Foundation
 
 public struct WidgetUsageSnapshot: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
     public let schemaVersion: Int
     public let generatedAt: Date
     public let todayTokens: Int64
     public let allTimeTokens: Int64
     public let fiveHourLimit: WidgetLimitStatus?
     public let weekLimit: WidgetLimitStatus?
+    public let limitFreshness: WidgetLimitFreshness
     public let projects: [WidgetProjectUsage]
     public let state: WidgetDataState
 
@@ -17,6 +18,7 @@ public struct WidgetUsageSnapshot: Codable, Equatable, Sendable {
         allTimeTokens: Int64,
         fiveHourLimit: WidgetLimitStatus?,
         weekLimit: WidgetLimitStatus?,
+        limitFreshness: WidgetLimitFreshness,
         projects: [WidgetProjectUsage],
         state: WidgetDataState
     ) {
@@ -26,9 +28,16 @@ public struct WidgetUsageSnapshot: Codable, Equatable, Sendable {
         self.allTimeTokens = allTimeTokens
         self.fiveHourLimit = fiveHourLimit
         self.weekLimit = weekLimit
+        self.limitFreshness = limitFreshness
         self.projects = Array(projects.prefix(3))
         self.state = state
     }
+}
+
+public enum WidgetLimitFreshness: Codable, Equatable, Sendable {
+    case fresh(observedAt: Date)
+    case stale(observedAt: Date)
+    case unavailable
 }
 
 public struct WidgetProjectUsage: Codable, Equatable, Sendable {
@@ -75,6 +84,7 @@ public extension WidgetUsageSnapshot {
             remainingPercent: 72,
             resetsAt: .now.addingTimeInterval(86_400)
         ),
+        limitFreshness: .fresh(observedAt: .now),
         projects: [
             WidgetProjectUsage(id: "one", name: "restaurant", tokens: 42_100),
             WidgetProjectUsage(id: "two", name: "monitor", tokens: 31_400),

@@ -117,6 +117,7 @@ struct UsageTimelineProviderTests {
                 remainingPercent: 72,
                 resetsAt: testNow.addingTimeInterval(86_400)
             ),
+            limitFreshness: .fresh(observedAt: testNow),
             projects: [
                 WidgetProjectUsage(id: "one", name: "restaurant", tokens: 42_100),
                 WidgetProjectUsage(id: "two", name: "monitor", tokens: 31_400),

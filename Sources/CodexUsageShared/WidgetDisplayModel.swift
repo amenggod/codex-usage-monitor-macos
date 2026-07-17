@@ -80,11 +80,35 @@ public struct WidgetDisplayModel: Equatable, Sendable {
     public var todayTokens: Int64 { snapshot?.todayTokens ?? 0 }
 
     public var visibleFiveHourLimit: WidgetLimitStatus? {
-        snapshot?.fiveHourLimit.flatMap { $0.resetsAt > now ? $0 : nil }
+        guard canDisplayLimits else { return nil }
+        return snapshot?.fiveHourLimit.flatMap { $0.resetsAt > now ? $0 : nil }
     }
 
     public var visibleWeekLimit: WidgetLimitStatus? {
-        snapshot?.weekLimit.flatMap { $0.resetsAt > now ? $0 : nil }
+        guard canDisplayLimits else { return nil }
+        return snapshot?.weekLimit.flatMap { $0.resetsAt > now ? $0 : nil }
+    }
+
+    private var effectiveLimitFreshness: WidgetLimitFreshness {
+        guard let freshness = snapshot?.limitFreshness else { return .unavailable }
+        switch freshness {
+        case let .fresh(observedAt):
+            let age = max(0, now.timeIntervalSince(observedAt))
+            if age <= 10 * 60 { return .fresh(observedAt: observedAt) }
+            if age <= 30 * 60 { return .stale(observedAt: observedAt) }
+            return .unavailable
+        case let .stale(observedAt):
+            return now.timeIntervalSince(observedAt) <= 30 * 60
+                ? .stale(observedAt: observedAt)
+                : .unavailable
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    private var canDisplayLimits: Bool {
+        if case .unavailable = effectiveLimitFreshness { return false }
+        return true
     }
 
     public var isStale: Bool {
@@ -109,6 +133,14 @@ public struct WidgetDisplayModel: Equatable, Sendable {
             break
         }
         guard let snapshot else { return "等待 Codex Usage Monitor 重新同步" }
+        switch effectiveLimitFreshness {
+        case .fresh:
+            break
+        case let .stale(observedAt):
+            return "上次实时同步 \(timeText(observedAt))"
+        case .unavailable:
+            return "实时限额不可用"
+        }
         switch snapshot.state {
         case let .fresh(lastSuccessfulAt):
             let prefix = isStale ? "上次更新" : "更新于"

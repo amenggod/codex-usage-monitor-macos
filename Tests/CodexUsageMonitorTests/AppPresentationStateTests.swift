@@ -87,6 +87,18 @@ struct AppPresentationStateTests {
         #expect(FreshnessFormatter.text(for: .failed("数据库不可用")) == "读取失败：数据库不可用")
     }
 
+    @Test func liveLimitFreshnessHasExplicitStatusText() {
+        let time = Date(timeIntervalSince1970: 10_000)
+        let formatted = time.formatted(date: .omitted, time: .shortened)
+
+        #expect(LimitFreshnessFormatter.text(for: .fresh(time)) == "实时限额更新于 \(formatted)")
+        #expect(LimitFreshnessFormatter.text(for: .stale(time)) == "上次实时同步 \(formatted)")
+        #expect(LimitFreshnessFormatter.text(for: .unavailable(
+            lastSuccessfulAt: time,
+            message: "连接失败"
+        )) == "实时限额不可用：连接失败")
+    }
+
     @MainActor
     @Test func settingsMenuBarVisibilityBindingUpdatesInjectedStoreAndPersists() throws {
         let suiteName = "MenuBarVisibilityTests-\(UUID().uuidString)"

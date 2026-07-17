@@ -178,6 +178,15 @@ struct UsagePopoverView: View {
                     "数据状态，\(FreshnessFormatter.text(for: model.snapshot.freshness))"
                 )
 
+            Label(
+                LimitFreshnessFormatter.text(for: model.snapshot.limitFreshness),
+                systemImage: LimitFreshnessFormatter.symbol(for: model.snapshot.limitFreshness)
+            )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+
             if let launchPromptError = launchPromptState.errorDescription {
                 Text(launchPromptError)
                     .font(.caption)
@@ -203,7 +212,7 @@ struct UsagePopoverView: View {
                 Label("重试", systemImage: "arrow.clockwise")
             }
             .labelStyle(.iconOnly)
-            .help("重新扫描 Codex 会话")
+            .help("刷新 Token 统计与实时限额")
 
             Button {
                 Task { await model.rebuildIndex() }

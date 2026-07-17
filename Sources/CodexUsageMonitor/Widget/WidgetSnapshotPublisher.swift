@@ -96,6 +96,7 @@ actor WidgetSnapshotPublisher: WidgetSnapshotPublishing {
                 allTimeTokens: 0,
                 fiveHourLimit: nil,
                 weekLimit: nil,
+                limitFreshness: .unavailable,
                 projects: [],
                 state: .rebuilding(lastSuccessfulAt: nil)
             )
@@ -143,6 +144,7 @@ private struct WidgetSnapshotFingerprint: Equatable, Sendable {
     let allTimeTokens: Int64
     let fiveHourLimit: WidgetLimitStatus?
     let weekLimit: WidgetLimitStatus?
+    let limitFreshness: WidgetLimitFreshness
     let projects: [WidgetProjectUsage]
     let stateKind: String
     let failedFiles: Int?
@@ -152,6 +154,7 @@ private struct WidgetSnapshotFingerprint: Equatable, Sendable {
         allTimeTokens = snapshot.allTimeTokens
         fiveHourLimit = snapshot.fiveHourLimit
         weekLimit = snapshot.weekLimit
+        limitFreshness = snapshot.limitFreshness
         projects = snapshot.projects
         switch snapshot.state {
         case .fresh:
@@ -206,6 +209,7 @@ private extension WidgetUsageSnapshot {
             allTimeTokens: allTimeTokens,
             fiveHourLimit: fiveHourLimit,
             weekLimit: weekLimit,
+            limitFreshness: limitFreshness,
             projects: projects,
             state: state
         )
@@ -236,6 +240,7 @@ private extension WidgetUsageSnapshot {
                     resetsAt: $0.resetsAt
                 )
             },
+            limitFreshness: today.limitFreshness.widgetFreshness,
             projects: all.projects.prefix(3).map {
                 WidgetProjectUsage(
                     id: opaqueProjectID($0.id),
@@ -251,6 +256,16 @@ private extension WidgetUsageSnapshot {
         SHA256.hash(data: Data(projectKey.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+}
+
+private extension LimitDataFreshness {
+    var widgetFreshness: WidgetLimitFreshness {
+        switch self {
+        case let .fresh(observedAt): .fresh(observedAt: observedAt)
+        case let .stale(observedAt): .stale(observedAt: observedAt)
+        case .unavailable: .unavailable
+        }
     }
 }
 
