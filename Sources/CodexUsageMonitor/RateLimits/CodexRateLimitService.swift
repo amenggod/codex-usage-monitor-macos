@@ -27,9 +27,11 @@ actor CodexRateLimitService: RateLimitServicing {
     private let store: LiveRateLimitStore
     private let now: @Sendable () -> Date
     private let retryDelays: [Duration]
+    private let pollInterval: Duration
     private let updateStream: AsyncStream<LiveRateLimitState>
     private let updateContinuation: AsyncStream<LiveRateLimitState>.Continuation
     private var notificationTask: Task<Void, Never>?
+    private var pollingTask: Task<Void, Never>?
     private var retryTask: Task<Void, Never>?
     private var retryIndex = 0
     private var initialized = false
@@ -41,12 +43,14 @@ actor CodexRateLimitService: RateLimitServicing {
         now: @escaping @Sendable () -> Date = Date.init,
         retryDelays: [Duration] = [
             .seconds(5), .seconds(30), .seconds(120)
-        ]
+        ],
+        pollInterval: Duration = .seconds(60)
     ) {
         self.transport = transport
         self.store = store
         self.now = now
         self.retryDelays = retryDelays
+        self.pollInterval = pollInterval
         let pair = AsyncStream<LiveRateLimitState>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
@@ -67,6 +71,9 @@ actor CodexRateLimitService: RateLimitServicing {
             }
         }
         await performRefresh(scheduleRetryOnFailure: true)
+        pollingTask = Task { [weak self] in
+            await self?.pollUntilStopped()
+        }
     }
 
     func refresh() async {
@@ -84,6 +91,8 @@ actor CodexRateLimitService: RateLimitServicing {
         started = false
         notificationTask?.cancel()
         notificationTask = nil
+        pollingTask?.cancel()
+        pollingTask = nil
         retryTask?.cancel()
         retryTask = nil
         initialized = false
@@ -93,6 +102,18 @@ actor CodexRateLimitService: RateLimitServicing {
 
     private func refreshFromNotification() async {
         await performRefresh(scheduleRetryOnFailure: true)
+    }
+
+    private func pollUntilStopped() async {
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: pollInterval)
+            } catch {
+                return
+            }
+            guard started, !Task.isCancelled else { return }
+            await performRefresh(scheduleRetryOnFailure: true)
+        }
     }
 
     private func performRefresh(scheduleRetryOnFailure: Bool) async {
@@ -131,6 +152,7 @@ actor CodexRateLimitService: RateLimitServicing {
             updateContinuation.yield(await store.state(now: observedAt))
         } catch {
             if error is CodexAppServerTransport.TransportError {
+                await transport.stop()
                 initialized = false
             }
             await store.markUnavailable(message: Self.safeMessage(for: error))

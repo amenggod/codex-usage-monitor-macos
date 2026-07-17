@@ -97,6 +97,7 @@ Actor 负责业务协议：
 - 把 `usedPercent`、`windowDurationMins`、`resetsAt` 与 `planType` 转换成现有 `RateLimitObservation`；
 - 300 分钟映射为 5 小时，10080 分钟映射为周，其余窗口不冒充已知限额；
 - 收到 `account/rateLimits/updated` 后触发一次完整重新读取，而不是直接用稀疏通知覆盖本地状态；
+- 由于多个 app-server 进程之间不保证转发滚动通知，主应用还会每 60 秒主动执行一次只读限额请求；
 - 发布 `AsyncStream<RateLimitServiceUpdate>`，供界面刷新、Widget 发布和通知评估；
 - 连接失败后采用有限退避重连；用户点击刷新时立即取消等待并重试。
 

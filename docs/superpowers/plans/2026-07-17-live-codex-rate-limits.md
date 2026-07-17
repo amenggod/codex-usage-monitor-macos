@@ -46,7 +46,7 @@
 - Consumes: one JSON response line and an observation `Date`.
 - Produces: `CodexRateLimitProtocol.decodeReadResult(from:observedAt:) throws -> [RateLimitObservation]` and `CodexRateLimitProtocol.isRateLimitsUpdatedNotification(_:) -> Bool`.
 
-- [ ] **Step 1: Write failing decoder tests**
+- [x] **Step 1: Write failing decoder tests**
 
 ```swift
 @Test func accountBucketProducesSixtyNinePercentRemaining() throws {
@@ -69,13 +69,13 @@
 
 Add cases for a legal single-bucket fallback, missing required values, unknown fields, a missing five-hour window, and `account/rateLimits/updated` method recognition.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `swift test --filter CodexRateLimitProtocolTests`
 
 Expected: compilation fails because `CodexRateLimitProtocol` does not exist.
 
-- [ ] **Step 3: Implement minimal typed decoding**
+- [x] **Step 3: Implement minimal typed decoding**
 
 ```swift
 enum CodexRateLimitProtocol {
@@ -87,13 +87,13 @@ enum CodexRateLimitProtocol {
 
 Decode `result.rateLimitsByLimitId.codex`, falling back only when `result.rateLimits.limitId == "codex"`; convert primary and secondary windows independently and ignore unsupported durations.
 
-- [ ] **Step 4: Run focused and full tests and verify GREEN**
+- [x] **Step 4: Run focused and full tests and verify GREEN**
 
 Run: `swift test --filter CodexRateLimitProtocolTests && swift test`
 
 Expected: all decoder cases and the existing 260-test baseline pass.
 
-- [ ] **Step 5: Commit the decoder**
+- [x] **Step 5: Commit the decoder**
 
 ```bash
 git add Sources/CodexUsageMonitor/RateLimits/CodexRateLimitProtocol.swift Tests/CodexUsageMonitorTests/CodexRateLimitProtocolTests.swift
@@ -112,7 +112,7 @@ git commit -m "feat: decode live Codex account limits"
 - Consumes: `CodexExecutableLocating.executableURL() throws -> URL`, injectable process session, newline JSON data.
 - Produces: `CodexAppServerTransport.start() async throws`, `request(method:params:timeout:) async throws -> Data`, `notifications() async -> AsyncStream<Data>`, and `stop() async`.
 
-- [ ] **Step 1: Write failing locator and transport tests**
+- [x] **Step 1: Write failing locator and transport tests**
 
 ```swift
 @Test func locatorPrefersInstalledChatGPTBundleCodex() throws {
@@ -132,13 +132,13 @@ git commit -m "feat: decode live Codex account limits"
 
 Cover executable permission rejection, JSON notifications, malformed lines, process exit, request timeout, and idempotent stop with an in-memory process-session fake.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `swift test --filter CodexExecutableLocatorTests && swift test --filter CodexAppServerTransportTests`
 
 Expected: compilation fails because locator and transport types do not exist.
 
-- [ ] **Step 3: Implement locator, process session, and actor transport**
+- [x] **Step 3: Implement locator, process session, and actor transport**
 
 ```swift
 protocol CodexAppServerTransporting: Sendable {
@@ -151,13 +151,13 @@ protocol CodexAppServerTransporting: Sendable {
 
 Use `NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex")`, the fixed ChatGPT path, then `PATH`. Start `codex app-server --stdio`, write one JSON object per line, keep response continuations by integer ID, route messages without an ID to the notification stream, and fail every pending request on exit.
 
-- [ ] **Step 4: Run focused and full tests and verify GREEN**
+- [x] **Step 4: Run focused and full tests and verify GREEN**
 
 Run: `swift test --filter CodexExecutableLocatorTests && swift test --filter CodexAppServerTransportTests && swift test`
 
 Expected: lifecycle/error tests and the full suite pass without hanging processes.
 
-- [ ] **Step 5: Commit transport**
+- [x] **Step 5: Commit transport**
 
 ```bash
 git add Sources/CodexUsageMonitor/RateLimits/CodexExecutableLocator.swift Sources/CodexUsageMonitor/RateLimits/CodexAppServerTransport.swift Tests/CodexUsageMonitorTests/CodexExecutableLocatorTests.swift Tests/CodexUsageMonitorTests/CodexAppServerTransportTests.swift
@@ -177,7 +177,7 @@ git commit -m "feat: add Codex app-server transport"
 - Consumes: `CodexAppServerTransporting`, decoded observations, and an injectable clock.
 - Produces: `LiveRateLimitState`, `LiveRateLimitProviding.state(now:) async -> LiveRateLimitState`, and `RateLimitServicing.start/refresh/updates/stop`.
 
-- [ ] **Step 1: Write failing service and store tests**
+- [x] **Step 1: Write failing service and store tests**
 
 ```swift
 @Test func stateTransitionsAtTenAndThirtyMinutes() async {
@@ -194,15 +194,15 @@ git commit -m "feat: add Codex app-server transport"
 }
 ```
 
-Cover initialize-before-read, manual refresh bypassing backoff, failure preserving a stale timestamp, stop cleanup, and unsupported responses becoming unavailable rather than 0%/100%.
+Cover initialize-before-read, manual refresh bypassing backoff, a 60-second active reread without notifications, failure preserving a stale timestamp, transport restart after request failure, stop cleanup, and unsupported responses becoming unavailable rather than 0%/100%.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `swift test --filter LiveRateLimitStoreTests && swift test --filter CodexRateLimitServiceTests`
 
 Expected: compilation fails because `LiveRateLimitState` and service/store actors do not exist.
 
-- [ ] **Step 3: Implement the store and service**
+- [x] **Step 3: Implement the store and service**
 
 ```swift
 enum LiveRateLimitState: Equatable, Sendable {
@@ -219,15 +219,15 @@ protocol RateLimitServicing: Sendable {
 }
 ```
 
-Initialize with `experimentalApi: true`, read with a 10-second timeout, replace the store only after a complete valid response, reread on updates, and schedule bounded 5-second/30-second/2-minute retries that manual refresh cancels.
+Initialize with `experimentalApi: true`, read with a 10-second timeout, replace the store only after a complete valid response, reread on updates and every 60 seconds, restart the transport after request failures, and schedule bounded 5-second/30-second/2-minute retries that manual refresh cancels.
 
-- [ ] **Step 4: Run focused and full tests and verify GREEN**
+- [x] **Step 4: Run focused and full tests and verify GREEN**
 
 Run: `swift test --filter LiveRateLimitStoreTests && swift test --filter CodexRateLimitServiceTests && swift test`
 
 Expected: all service/store timing cases and the full suite pass.
 
-- [ ] **Step 5: Commit service/store**
+- [x] **Step 5: Commit service/store**
 
 ```bash
 git add Sources/CodexUsageMonitor/Domain/UsageModels.swift Sources/CodexUsageMonitor/RateLimits/CodexRateLimitService.swift Sources/CodexUsageMonitor/RateLimits/LiveRateLimitStore.swift Tests/CodexUsageMonitorTests/CodexRateLimitServiceTests.swift Tests/CodexUsageMonitorTests/LiveRateLimitStoreTests.swift
@@ -248,7 +248,7 @@ git commit -m "feat: track live Codex limit freshness"
 - Consumes: `LiveRateLimitProviding`, `RateLimitServicing`, existing local ingestion and repository.
 - Produces: `DashboardSnapshot.limitFreshness`, parallel manual refresh, automatic refresh on live updates, and fresh-only notification evaluation.
 
-- [ ] **Step 1: Write failing aggregation and view-model tests**
+- [x] **Step 1: Write failing aggregation and view-model tests**
 
 ```swift
 @Test func localLogLimitsCannotOverrideLiveAccountLimits() async throws {
@@ -267,13 +267,13 @@ git commit -m "feat: track live Codex limit freshness"
 
 Add cases proving startup starts both sources, a rate-limit update refreshes without a click, unavailable limits do not erase Token totals, stale limits do not notify, and `codex_bengalfox` cannot enter the dashboard.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `swift test --filter UsageAggregatorTests && swift test --filter UsageViewModelTests`
 
 Expected: new assertions fail because aggregation still reads `repository.latestLimits()` and retry only rescans logs.
 
-- [ ] **Step 3: Wire live state through aggregation and presentation**
+- [x] **Step 3: Wire live state through aggregation and presentation**
 
 ```swift
 struct DashboardSnapshot: Equatable, Sendable {
@@ -288,13 +288,13 @@ struct DashboardSnapshot: Equatable, Sendable {
 
 Have the aggregator fetch Token rows and live state independently; have `UsageViewModel.start()` observe both streams, `retry()` launch local rescan and `rateLimitService.refresh()` together, and call the notifier only when `limitFreshness` is fresh. Assemble the locator, transport, store, service, aggregator, and publisher once in `LiveDependencies`.
 
-- [ ] **Step 4: Run focused and full tests and verify GREEN**
+- [x] **Step 4: Run focused and full tests and verify GREEN**
 
 Run: `swift test --filter UsageAggregatorTests && swift test --filter UsageViewModelTests && swift test --filter NotificationCoordinatorTests && swift test`
 
 Expected: 69% live-state behavior, dual refresh, update propagation, fresh-only notifications, and all legacy tests pass.
 
-- [ ] **Step 5: Commit integration**
+- [x] **Step 5: Commit integration**
 
 ```bash
 git add Sources/CodexUsageMonitor/Aggregation/UsageAggregator.swift Sources/CodexUsageMonitor/Presentation/UsageViewModel.swift Sources/CodexUsageMonitor/App/LiveDependencies.swift Tests/CodexUsageMonitorTests/UsageAggregatorTests.swift Tests/CodexUsageMonitorTests/UsageViewModelTests.swift Tests/CodexUsageMonitorTests/NotificationCoordinatorTests.swift
@@ -318,7 +318,7 @@ git commit -m "fix: refresh dashboard from live Codex limits"
 - Consumes: dashboard `limitFreshness` and active live limits.
 - Produces: `WidgetUsageSnapshot.currentSchemaVersion == 2` and `WidgetLimitFreshness` encoded without sensitive fields.
 
-- [ ] **Step 1: Write failing schema and display tests**
+- [x] **Step 1: Write failing schema and display tests**
 
 ```swift
 @Test func schemaTwoCarriesFreshLimitObservationTime() throws {
@@ -336,13 +336,13 @@ git commit -m "fix: refresh dashboard from live Codex limits"
 
 Cover schema 1 rejection, 10–30 minute stale copy, over-30-minute hiding, fresh 69% publication, fingerprint-triggered reload, and Token values remaining visible when only limits are unavailable.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `swift test --filter WidgetUsageSnapshotTests && swift test --filter WidgetDisplayModelTests && swift test --filter WidgetSnapshotPublisherTests`
 
 Expected: schema/freshness assertions fail because the shared payload is still schema 1.
 
-- [ ] **Step 3: Implement schema 2 projection and UI policy**
+- [x] **Step 3: Implement schema 2 projection and UI policy**
 
 ```swift
 public enum WidgetLimitFreshness: Codable, Equatable, Sendable {
@@ -354,13 +354,13 @@ public enum WidgetLimitFreshness: Codable, Equatable, Sendable {
 
 Add `limitFreshness` to the whitelist payload and fingerprint; expose limits only for fresh/stale states with unexpired reset times; use `更新于` for fresh, `上次实时同步` for stale, and `实时限额不可用` for unavailable. Treat schema 1 as invalid until the main app republishes.
 
-- [ ] **Step 4: Run focused and full tests and verify GREEN**
+- [x] **Step 4: Run focused and full tests and verify GREEN**
 
 Run: `swift test --filter WidgetUsageSnapshotTests && swift test --filter WidgetDisplayModelTests && swift test --filter WidgetSnapshotPublisherTests && swift test --filter UsageTimelineProviderTests && swift test`
 
 Expected: schema 2, privacy whitelist, visibility, copy, timeline, and full suite pass.
 
-- [ ] **Step 5: Commit WidgetKit propagation**
+- [x] **Step 5: Commit WidgetKit propagation**
 
 ```bash
 git add Sources/CodexUsageShared Sources/CodexUsageMonitor/Widget Sources/CodexUsageMonitorWidget Tests/CodexUsageSharedTests Tests/CodexUsageMonitorWidgetTests Tests/CodexUsageMonitorTests/WidgetSnapshotPublisherTests.swift
@@ -370,8 +370,8 @@ git commit -m "feat: publish live limit freshness to widget"
 ### Task 6: Build, install, and verify against the live account
 
 **Files:**
-- Modify: `VERSION`
-- Modify: `BUILD_NUMBER`
+- Modify: `project.yml`
+- Modify: `CodexUsageMonitor.xcodeproj/project.pbxproj`
 - Modify: `README.md`
 - Modify: `docs/superpowers/specs/2026-07-17-live-codex-rate-limits-design.md`
 
@@ -379,35 +379,35 @@ git commit -m "feat: publish live limit freshness to widget"
 - Consumes: signed app bundle, installed ChatGPT login, live app-server response, App Group snapshot.
 - Produces: version 0.2.3 build 5, verified installation, current live percentage parity, and documented WidgetKit timing limitation.
 
-- [ ] **Step 1: Add release-facing assertions/documentation**
+- [x] **Step 1: Add release-facing assertions/documentation**
 
 Update README behavior: app/menu bar/alerts consume live account limits; WidgetKit receives immediate reload requests but remains scheduled by macOS; missing five-hour values stay hidden; unavailable live data never falls back to old log percentages.
 
-- [ ] **Step 2: Run complete automated verification**
+- [x] **Step 2: Run complete automated verification**
 
 Run: `swift test`
 
 Expected: every test passes with 0 failures.
 
-- [ ] **Step 3: Build a signed release app**
+- [x] **Step 3: Build a signed release app**
 
 Run: `CODE_SIGNING_ALLOWED=YES DEVELOPMENT_TEAM=ZD9PK3NY5Z CODE_SIGN_STYLE=Automatic bash Scripts/build-app.sh`
 
 Expected: app, login item, and widget extension build successfully and `codesign` reports Team ID `ZD9PK3NY5Z` with App Group `ZD9PK3NY5Z.CodexUsageMonitor.shared`.
 
-- [ ] **Step 4: Install and perform real-device acceptance**
+- [x] **Step 4: Install and perform real-device acceptance**
 
 Quit the prior monitor, preserve it in `/tmp`, install the new bundle with `ditto`, launch it, click refresh, and compare the app plus App Group JSON against a fresh read from `/Applications/ChatGPT.app/Contents/Resources/codex app-server --stdio`. Verify the main `codex` remaining percentage matches, the model bucket is ignored, and WidgetKit accepts the reload request.
 
-- [ ] **Step 5: Commit release metadata and push**
+- [x] **Step 5: Commit release metadata and push**
 
 ```bash
-git add VERSION BUILD_NUMBER README.md docs/superpowers/specs/2026-07-17-live-codex-rate-limits-design.md docs/superpowers/plans/2026-07-17-live-codex-rate-limits.md
+git add project.yml CodexUsageMonitor.xcodeproj/project.pbxproj README.md docs/superpowers/specs/2026-07-17-live-codex-rate-limits-design.md docs/superpowers/plans/2026-07-17-live-codex-rate-limits.md
 git commit -m "release: prepare live quota monitor 0.2.3"
 git push origin codex/usage-monitor-v2
 ```
 
-- [ ] **Step 6: Verify GitHub PR checks**
+- [x] **Step 6: Verify GitHub PR checks**
 
 Run: `gh pr checks 1 --watch`
 

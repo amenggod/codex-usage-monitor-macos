@@ -74,6 +74,50 @@ struct CodexRateLimitServiceTests {
         await service.stop()
     }
 
+    @Test
+    func requestFailureRestartsTransportBeforeReinitializing() async {
+        let transport = FakeRateLimitTransport()
+        let store = LiveRateLimitStore()
+        let service = CodexRateLimitService(
+            transport: transport,
+            store: store,
+            now: { Date(timeIntervalSince1970: 2_000) },
+            retryDelays: []
+        )
+        await transport.setReadResponse(readResponse(usedPercent: 31))
+        await transport.failNextRead()
+
+        await service.start()
+        await service.refresh()
+
+        #expect(await transport.stopCount == 1)
+        #expect(await transport.methods == [
+            "initialize", "account/rateLimits/read",
+            "initialize", "account/rateLimits/read",
+        ])
+        await service.stop()
+    }
+
+    @Test
+    func periodicallyReadsLimitsWithoutReceivingANotification() async throws {
+        let transport = FakeRateLimitTransport()
+        let store = LiveRateLimitStore()
+        await transport.setReadResponse(readResponse(usedPercent: 31))
+        let service = CodexRateLimitService(
+            transport: transport,
+            store: store,
+            now: { Date(timeIntervalSince1970: 2_000) },
+            retryDelays: [],
+            pollInterval: .milliseconds(20)
+        )
+
+        await service.start()
+        try await waitUntil { await transport.readCount >= 2 }
+
+        #expect(await transport.readCount >= 2)
+        await service.stop()
+    }
+
     private func readResponse(usedPercent: Int) -> Data {
         let template = #"{"id":2,"result":{"rateLimits":{"limitId":"codex","planType":"prolite","primary":null,"secondary":{"usedPercent":VALUE,"windowDurationMins":10080,"resetsAt":9000}},"rateLimitsByLimitId":{"codex":{"limitId":"codex","planType":"prolite","primary":null,"secondary":{"usedPercent":VALUE,"windowDurationMins":10080,"resetsAt":9000}}}}}"#
         return Data(template.replacingOccurrences(
@@ -102,6 +146,8 @@ private actor FakeRateLimitTransport: CodexAppServerTransporting {
     private(set) var methods: [String] = []
     private var response = Data(#"{"id":1,"result":{}}"#.utf8)
     private var shouldFail = false
+    private var shouldFailNextRead = false
+    private(set) var stopCount = 0
 
     init() {
         let pair = AsyncStream<Data>.makeStream(bufferingPolicy: .bufferingNewest(8))
@@ -121,6 +167,10 @@ private actor FakeRateLimitTransport: CodexAppServerTransporting {
         shouldFail = value
     }
 
+    func failNextRead() {
+        shouldFailNextRead = true
+    }
+
     func emit(_ data: Data) {
         continuation.yield(data)
     }
@@ -135,13 +185,17 @@ private actor FakeRateLimitTransport: CodexAppServerTransporting {
         if method == "initialize" {
             return Data(#"{"id":1,"result":{}}"#.utf8)
         }
+        if shouldFailNextRead {
+            shouldFailNextRead = false
+            throw CodexAppServerTransport.TransportError.requestTimedOut
+        }
         return response
     }
 
     func notifications() async -> AsyncStream<Data> { stream }
 
     func stop() async {
-        continuation.finish()
+        stopCount += 1
     }
 }
 
