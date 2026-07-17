@@ -4,6 +4,19 @@ import Testing
 
 @Suite("WidgetUsageSnapshotTests")
 struct WidgetUsageSnapshotTests {
+    @Test func appGroupUsesTheSigningTeamPrefixRequiredByMacOS() {
+        let teamIdentifier = "ZD9PK3NY5Z"
+
+        #expect(
+            WidgetSnapshotStore.appGroupIdentifier
+                == "ZD9PK3NY5Z.CodexUsageMonitor.shared"
+        )
+        #expect(
+            WidgetSnapshotStore.appGroupIdentifier
+                .hasPrefix("\(teamIdentifier).")
+        )
+    }
+
     @Test(arguments: WidgetUsageSnapshot.privacyFixtures)
     func storedSnapshotMatchesTheDisplaySafeJSONWhitelist(
         snapshot: WidgetUsageSnapshot

@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.2.1"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "0.2.2"
+    CURRENT_PROJECT_VERSION: "4"
 packages:
   SwiftTesting:
     url: https://github.com/swiftlang/swift-testing.git
@@ -21,8 +21,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Shared
         GENERATE_INFOPLIST_FILE: YES
-        MARKETING_VERSION: "0.2.1"
-        CURRENT_PROJECT_VERSION: "3"
+        MARKETING_VERSION: "0.2.2"
+        CURRENT_PROJECT_VERSION: "4"
   CodexUsageMonitor:
     type: application
     platform: macOS
@@ -49,7 +49,7 @@ targets:
       path: Config/CodexUsageMonitor.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.amenggod.CodexUsageMonitor
+          - ZD9PK3NY5Z.CodexUsageMonitor.shared
     settings:
       base:
         PRODUCT_NAME: Codex Usage Monitor
@@ -94,7 +94,7 @@ targets:
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.application-groups:
-          - group.com.amenggod.CodexUsageMonitor
+          - ZD9PK3NY5Z.CodexUsageMonitor.shared
     dependencies:
       - target: CodexUsageShared
     settings:

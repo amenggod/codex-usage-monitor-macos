@@ -66,7 +66,7 @@ Swift Package 继续作为核心逻辑测试入口。Xcode 工程负责应用、
 
 - 主应用：`com.amenggod.CodexUsageMonitor`；
 - Widget Extension：`com.amenggod.CodexUsageMonitor.Widget`；
-- App Group：`group.com.amenggod.CodexUsageMonitor`；
+- App Group：`ZD9PK3NY5Z.CodexUsageMonitor.shared`（必须使用签名团队前缀）；
 - 小组件 kind：`com.amenggod.CodexUsageMonitor.usage`；
 - 深度链接：`codexusagemonitor://dashboard`。
 

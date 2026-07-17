@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP="${1:?usage: verify-bundle.sh /path/to/app}"
 CODESIGN_BIN="${CODESIGN_BIN:-/usr/bin/codesign}"
-EXPECTED_APP_GROUP="group.com.amenggod.CodexUsageMonitor"
+EXPECTED_APP_GROUP="ZD9PK3NY5Z.CodexUsageMonitor.shared"
 
 fail() {
   echo "bundle verification failed: $*" >&2

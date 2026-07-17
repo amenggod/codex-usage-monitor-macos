@@ -11,7 +11,7 @@ public enum WidgetSnapshotStoreError: Error, Equatable, Sendable {
 }
 
 public struct WidgetSnapshotStore: WidgetSnapshotStoring, Sendable {
-    public static let appGroupIdentifier = "group.com.amenggod.CodexUsageMonitor"
+    public static let appGroupIdentifier = "ZD9PK3NY5Z.CodexUsageMonitor.shared"
     public let fileURL: URL
 
     public init(directoryURL: URL, fileManager: FileManager = .default) throws {

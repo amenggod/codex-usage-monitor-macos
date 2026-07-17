@@ -48,7 +48,7 @@ if [[ "$operation" == "requirement" && "$requirement" != "=anchor apple generic"
 fi
 
 profile="${SIGNING_PROFILE:?}"
-team="TEAM123456"
+team="ZD9PK3NY5Z"
 authority="Apple Development: Fixture"
 
 if [[ "$profile" == "different-team" && "$path" == *CodexUsageMonitorWidget* ]]; then
@@ -78,7 +78,7 @@ if [[ "$operation" == "entitlements" ]]; then
     exit 2
   fi
 
-  group="group.com.amenggod.CodexUsageMonitor"
+  group="ZD9PK3NY5Z.CodexUsageMonitor.shared"
   include_group="YES"
   case "$profile" in
     missing-entitlement)
@@ -90,7 +90,7 @@ if [[ "$operation" == "entitlements" ]]; then
       group="group.com.example.WrongUsageMonitor"
       ;;
     whitespace-group)
-      group="group.com.amenggod.CodexUsageMonitor "
+      group="ZD9PK3NY5Z.CodexUsageMonitor.shared "
       ;;
     app-widget-mismatch)
       if [[ "$path" == *CodexUsageMonitorWidget.appex ]]; then
