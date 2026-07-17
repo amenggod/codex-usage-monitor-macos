@@ -139,6 +139,8 @@ struct WidgetSnapshotPublisherTests {
         )
 
         #expect(store.snapshots.count == 2)
+        #expect(store.snapshots[0].generatedAt == testNow)
+        #expect(store.snapshots[1].generatedAt == testNow.addingTimeInterval(60))
         #expect(try #require(store.lastSnapshot).limitFreshness == .fresh(
             observedAt: secondObservedAt
         ))
@@ -252,6 +254,151 @@ struct WidgetSnapshotPublisherTests {
         )
 
         #expect(reloader.reloadCount == 2)
+    }
+
+    @Test func freshOrStaleLimitBecomingUnavailableTriggersReload() async {
+        let week = LimitStatus(
+            window: .week,
+            usedPercent: 40,
+            resetsAt: testNow.addingTimeInterval(86_400)
+        )
+        let unavailable = LimitDataFreshness.unavailable(
+            lastSuccessfulAt: testNow,
+            message: "实时限额暂不可用"
+        )
+
+        for initialFreshness in [
+            LimitDataFreshness.fresh(testNow),
+            .stale(testNow),
+        ] {
+            let reloadCount = await secondPublishReloadCount(
+                firstToday: makeSnapshot(
+                    range: .today,
+                    total: 12,
+                    projects: [],
+                    limits: [week],
+                    limitFreshness: initialFreshness
+                ),
+                firstAll: makeSnapshot(range: .all, total: 100, projects: []),
+                secondToday: makeSnapshot(
+                    range: .today,
+                    total: 12,
+                    projects: [],
+                    limits: [week],
+                    limitFreshness: unavailable
+                ),
+                secondAll: makeSnapshot(range: .all, total: 100, projects: [])
+            )
+
+            #expect(reloadCount == 2)
+        }
+    }
+
+    @Test func visibleProjectRankingChangeTriggersReload() async {
+        let firstProjects = [
+            ProjectUsage(
+                id: "alpha",
+                displayName: "Alpha",
+                fullPath: nil,
+                usage: usage(80)
+            )
+        ]
+        let secondProjects = [
+            ProjectUsage(
+                id: "beta",
+                displayName: "Beta",
+                fullPath: nil,
+                usage: usage(90)
+            )
+        ]
+
+        let reloadCount = await secondPublishReloadCount(
+            firstToday: makeSnapshot(range: .today, total: 12, projects: []),
+            firstAll: makeSnapshot(range: .all, total: 100, projects: firstProjects),
+            secondToday: makeSnapshot(range: .today, total: 12, projects: []),
+            secondAll: makeSnapshot(range: .all, total: 100, projects: secondProjects)
+        )
+
+        #expect(reloadCount == 2)
+    }
+
+    @Test func limitAppearanceAndDisappearanceEachTriggerReload() async {
+        let week = LimitStatus(
+            window: .week,
+            usedPercent: 40,
+            resetsAt: testNow.addingTimeInterval(86_400)
+        )
+        let all = makeSnapshot(range: .all, total: 100, projects: [])
+        let reloader = WidgetReloaderSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([
+                makeSnapshot(range: .today, total: 12, projects: [], limits: []),
+                all,
+                makeSnapshot(range: .today, total: 12, projects: [], limits: [week]),
+                all,
+                makeSnapshot(range: .today, total: 12, projects: [], limits: []),
+                all,
+            ]),
+            store: WidgetStoreSpy(),
+            reloader: reloader
+        )
+
+        _ = await publisher.publish(now: testNow, calendar: testCalendar)
+        #expect(reloader.reloadCount == 1)
+
+        _ = await publisher.publish(
+            now: testNow.addingTimeInterval(1),
+            calendar: testCalendar
+        )
+        #expect(reloader.reloadCount == 2)
+
+        _ = await publisher.publish(
+            now: testNow.addingTimeInterval(2),
+            calendar: testCalendar
+        )
+        #expect(reloader.reloadCount == 3)
+    }
+
+    @Test func widgetDataStateCategoryChangeTriggersReload() async {
+        let reloadCount = await secondPublishReloadCount(
+            firstToday: makeSnapshot(
+                range: .today,
+                total: 12,
+                projects: [],
+                freshness: .fresh(testNow)
+            ),
+            firstAll: makeSnapshot(range: .all, total: 100, projects: []),
+            secondToday: makeSnapshot(
+                range: .today,
+                total: 12,
+                projects: [],
+                freshness: .stale(testNow)
+            ),
+            secondAll: makeSnapshot(range: .all, total: 100, projects: [])
+        )
+
+        #expect(reloadCount == 2)
+    }
+
+    @Test func partialFailedFileCountChangeTriggersReload() async {
+        let reloadCount = await secondPublishReloadCount(
+            firstToday: makeSnapshot(
+                range: .today,
+                total: 12,
+                projects: [],
+                freshness: .partial(testNow, failedFiles: 1)
+            ),
+            firstAll: makeSnapshot(range: .all, total: 100, projects: []),
+            secondToday: makeSnapshot(
+                range: .today,
+                total: 12,
+                projects: [],
+                freshness: .partial(testNow, failedFiles: 2)
+            ),
+            secondAll: makeSnapshot(range: .all, total: 100, projects: [])
+        )
+
+        #expect(reloadCount == 2)
     }
 
     @Test func publisherMapsActiveLimitsAndHidesExpiredFiveHourLimit() async throws {
@@ -728,6 +875,32 @@ private func makeStoredWidgetSnapshot(
         ],
         state: state
     )
+}
+
+private func secondPublishReloadCount(
+    firstToday: DashboardSnapshot,
+    firstAll: DashboardSnapshot,
+    secondToday: DashboardSnapshot,
+    secondAll: DashboardSnapshot
+) async -> Int {
+    let reloader = WidgetReloaderSpy()
+    let publisher = WidgetSnapshotPublisher(
+        aggregator: WidgetPublisherAggregatorSpy([
+            firstToday,
+            firstAll,
+            secondToday,
+            secondAll,
+        ]),
+        store: WidgetStoreSpy(),
+        reloader: reloader
+    )
+
+    _ = await publisher.publish(now: testNow, calendar: testCalendar)
+    _ = await publisher.publish(
+        now: testNow.addingTimeInterval(1),
+        calendar: testCalendar
+    )
+    return reloader.reloadCount
 }
 
 private func publisherEventually(
