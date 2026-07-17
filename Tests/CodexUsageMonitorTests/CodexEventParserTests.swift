@@ -148,6 +148,18 @@ struct CodexEventParserTests {
     }
 
     @Test
+    func preservesPlanTypeForLimitScopeSelection() throws {
+        let line = Data(#"{"timestamp":"2026-07-14T01:05:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","plan_type":"prolite","primary":{"used_percent":27,"window_minutes":10080,"resets_at":1784510029}}}}"#.utf8)
+        let event = try #require(parser.parse(line: line))
+        guard case let .token(token) = event else {
+            Issue.record("expected token")
+            return
+        }
+
+        #expect(token.limits.map(\.planType) == ["prolite"])
+    }
+
+    @Test
     func rejectsNonIntegralOrIncompleteUsageObjects() throws {
         let invalidUsages = [
             #""input_tokens":true,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":135"#,

@@ -150,6 +150,69 @@ struct UsageRepositoryTests {
     }
 
     @Test
+    func existingVersionTwoMigratesRateLimitsAndClearsCursorsForRescan() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        try createLegacyVersionTwoRateLimitDatabase(at: databaseURL)
+        let repository = try UsageRepository(url: databaseURL)
+
+        try await repository.migrate()
+
+        #expect(try queryRawInteger(
+            "SELECT COUNT(*) FROM pragma_table_info('rate_limits') WHERE pk > 0",
+            at: databaseURL
+        ) == 3)
+        #expect(try queryRawInteger(
+            "SELECT pk FROM pragma_table_info('rate_limits') WHERE name = 'plan_type'",
+            at: databaseURL
+        ) == 3)
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM file_cursors", at: databaseURL) == 0)
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM rate_limits", at: databaseURL) == 1)
+    }
+
+    @Test
+    func intermediateVersionTwoRateLimitKeyMigratesAndClearsCursorsForRescan() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        try createIntermediateVersionTwoRateLimitDatabase(at: databaseURL)
+        let repository = try UsageRepository(url: databaseURL)
+
+        try await repository.migrate()
+
+        #expect(try queryRawInteger(
+            "SELECT COUNT(*) FROM pragma_table_info('rate_limits') WHERE pk > 0",
+            at: databaseURL
+        ) == 3)
+        #expect(try queryRawInteger(
+            "SELECT pk FROM pragma_table_info('rate_limits') WHERE name = 'plan_type'",
+            at: databaseURL
+        ) == 3)
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM file_cursors", at: databaseURL) == 0)
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM rate_limits", at: databaseURL) == 1)
+    }
+
+    @Test
+    func resetCycleVersionTwoKeyMigratesToPlanScopeAndKeepsLatestObservation() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        try createResetCycleVersionTwoRateLimitDatabase(at: databaseURL)
+        let repository = try UsageRepository(url: databaseURL)
+
+        try await repository.migrate()
+
+        #expect(try queryRawInteger(
+            "SELECT pk FROM pragma_table_info('rate_limits') WHERE name = 'plan_type'",
+            at: databaseURL
+        ) == 3)
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM file_cursors", at: databaseURL) == 0)
+        #expect(try queryRawInteger("SELECT COUNT(*) FROM rate_limits", at: databaseURL) == 1)
+        #expect(try queryRawInteger(
+            "SELECT CAST(used_percent AS INTEGER) FROM rate_limits",
+            at: databaseURL
+        ) == 4)
+    }
+
+    @Test
     func cursorRoundTripsActiveSessionID() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }
@@ -366,6 +429,67 @@ struct UsageRepositoryTests {
     }
 
     @Test
+    func distinctLimitIDsForTheSameWindowArePreserved() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        let overall = RateLimitObservation(
+            limitID: "codex",
+            window: .week,
+            usedPercent: 27,
+            resetsAt: Date(timeIntervalSince1970: 3_000),
+            observedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let modelSpecific = RateLimitObservation(
+            limitID: "codex_bengalfox",
+            window: .week,
+            usedPercent: 0,
+            resetsAt: Date(timeIntervalSince1970: 4_000),
+            observedAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        try await repository.replaceLatestLimits([overall])
+        try await repository.replaceLatestLimits([modelSpecific])
+
+        #expect(Set(try await repository.latestLimits().map(\.limitID)) == [
+            "codex",
+            "codex_bengalfox",
+        ])
+    }
+
+    @Test
+    func distinctPlanScopesForTheSameLimitIDArePreserved() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { removeDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        let firstCycle = RateLimitObservation(
+            limitID: "codex",
+            planType: "prolite",
+            window: .week,
+            usedPercent: 27,
+            resetsAt: Date(timeIntervalSince1970: 3_000),
+            observedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let secondCycle = RateLimitObservation(
+            limitID: "codex",
+            window: .week,
+            usedPercent: 4,
+            resetsAt: Date(timeIntervalSince1970: 4_000),
+            observedAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        try await repository.replaceLatestLimits([firstCycle])
+        try await repository.replaceLatestLimits([secondCycle])
+
+        let stored = try await repository.latestLimits()
+        #expect(stored.count == 2)
+        #expect(stored.contains(firstCycle))
+        #expect(stored.contains(secondCycle))
+    }
+
+    @Test
     func earlierLimitObservationCannotOverwriteLatestUnknownWindow() async throws {
         let databaseURL = temporaryDatabaseURL()
         defer { removeDatabase(at: databaseURL) }
@@ -375,14 +499,14 @@ struct UsageRepositoryTests {
             limitID: "flex",
             window: .other(minutes: 60, label: "Flexible"),
             usedPercent: 75,
-            resetsAt: Date(timeIntervalSince1970: 3_000),
+            resetsAt: Date(timeIntervalSince1970: 2_500),
             observedAt: Date(timeIntervalSince1970: 2_000)
         )
         let earlier = RateLimitObservation(
-            limitID: "stale",
+            limitID: "flex",
             window: .other(minutes: 60, label: "Flexible"),
             usedPercent: 10,
-            resetsAt: Date(timeIntervalSince1970: 2_500),
+            resetsAt: Date(timeIntervalSince1970: 3_000),
             observedAt: Date(timeIntervalSince1970: 1_000)
         )
 
@@ -706,6 +830,157 @@ struct UsageRepositoryTests {
             );
             INSERT INTO notification_receipts (receipt_key, sent_at)
             VALUES ('\(receiptKey)', 1000);
+            PRAGMA user_version = 2;
+            """,
+            handle: handle
+        )
+    }
+
+    private func createLegacyVersionTwoRateLimitDatabase(at url: URL) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create legacy rate limit fixture")
+        }
+        defer { sqlite3_close(handle) }
+        try executeRawSQL(
+            """
+            CREATE TABLE file_cursors (
+              file_key TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              byte_offset INTEGER NOT NULL,
+              modified_at REAL NOT NULL,
+              active_session_id TEXT,
+              boundary_fingerprint TEXT
+            );
+            INSERT INTO file_cursors (
+              file_key, path, byte_offset, modified_at, active_session_id, boundary_fingerprint
+            ) VALUES ('session', '/tmp/session.jsonl', 42, 1000, NULL, NULL);
+            CREATE TABLE rate_limits (
+              window_key TEXT PRIMARY KEY,
+              limit_id TEXT NOT NULL,
+              window_minutes INTEGER NOT NULL,
+              window_label TEXT,
+              used_percent REAL NOT NULL,
+              resets_at REAL NOT NULL,
+              observed_at REAL NOT NULL
+            );
+            INSERT INTO rate_limits (
+              window_key, limit_id, window_minutes, window_label,
+              used_percent, resets_at, observed_at
+            ) VALUES ('week', 'codex_bengalfox', 10080, NULL, 0, 4000, 2000);
+            CREATE TABLE index_metadata (
+              key TEXT PRIMARY KEY,
+              value INTEGER NOT NULL
+            );
+            INSERT INTO index_metadata (key, value)
+            VALUES ('event_identity_version', 2);
+            PRAGMA user_version = 2;
+            """,
+            handle: handle
+        )
+    }
+
+    private func createIntermediateVersionTwoRateLimitDatabase(at url: URL) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create intermediate rate limit fixture")
+        }
+        defer { sqlite3_close(handle) }
+        try executeRawSQL(
+            """
+            CREATE TABLE file_cursors (
+              file_key TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              byte_offset INTEGER NOT NULL,
+              modified_at REAL NOT NULL,
+              active_session_id TEXT,
+              boundary_fingerprint TEXT
+            );
+            INSERT INTO file_cursors (
+              file_key, path, byte_offset, modified_at, active_session_id, boundary_fingerprint
+            ) VALUES ('session', '/tmp/session.jsonl', 42, 1000, NULL, NULL);
+            CREATE TABLE rate_limits (
+              window_key TEXT NOT NULL,
+              limit_id TEXT NOT NULL,
+              window_minutes INTEGER NOT NULL,
+              window_label TEXT,
+              used_percent REAL NOT NULL,
+              resets_at REAL NOT NULL,
+              observed_at REAL NOT NULL,
+              PRIMARY KEY (window_key, limit_id)
+            );
+            INSERT INTO rate_limits (
+              window_key, limit_id, window_minutes, window_label,
+              used_percent, resets_at, observed_at
+            ) VALUES ('week', 'codex', 10080, NULL, 4, 4000, 2000);
+            CREATE TABLE index_metadata (
+              key TEXT PRIMARY KEY,
+              value INTEGER NOT NULL
+            );
+            INSERT INTO index_metadata (key, value)
+            VALUES ('event_identity_version', 2);
+            PRAGMA user_version = 2;
+            """,
+            handle: handle
+        )
+    }
+
+    private func createResetCycleVersionTwoRateLimitDatabase(at url: URL) throws {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            url.path,
+            &handle,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let handle else {
+            throw SQLiteError(code: openResult, message: "could not create reset cycle fixture")
+        }
+        defer { sqlite3_close(handle) }
+        try executeRawSQL(
+            """
+            CREATE TABLE file_cursors (
+              file_key TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              byte_offset INTEGER NOT NULL,
+              modified_at REAL NOT NULL,
+              active_session_id TEXT,
+              boundary_fingerprint TEXT
+            );
+            INSERT INTO file_cursors (
+              file_key, path, byte_offset, modified_at, active_session_id, boundary_fingerprint
+            ) VALUES ('session', '/tmp/session.jsonl', 42, 1000, NULL, NULL);
+            CREATE TABLE rate_limits (
+              window_key TEXT NOT NULL,
+              limit_id TEXT NOT NULL,
+              window_minutes INTEGER NOT NULL,
+              window_label TEXT,
+              used_percent REAL NOT NULL,
+              resets_at REAL NOT NULL,
+              observed_at REAL NOT NULL,
+              PRIMARY KEY (window_key, limit_id, resets_at)
+            );
+            INSERT INTO rate_limits VALUES
+              ('week', 'codex', 10080, NULL, 27, 3000, 1000),
+              ('week', 'codex', 10080, NULL, 4, 4000, 2000);
+            CREATE TABLE index_metadata (
+              key TEXT PRIMARY KEY,
+              value INTEGER NOT NULL
+            );
+            INSERT INTO index_metadata (key, value)
+            VALUES ('event_identity_version', 2);
             PRAGMA user_version = 2;
             """,
             handle: handle

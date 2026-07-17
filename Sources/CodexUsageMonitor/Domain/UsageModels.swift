@@ -58,10 +58,27 @@ enum LimitWindow: Equatable, Hashable, Sendable {
 
 struct RateLimitObservation: Equatable, Sendable {
     let limitID: String
+    let planType: String?
     let window: LimitWindow
     let usedPercent: Double
     let resetsAt: Date
     let observedAt: Date
+
+    init(
+        limitID: String,
+        planType: String? = nil,
+        window: LimitWindow,
+        usedPercent: Double,
+        resetsAt: Date,
+        observedAt: Date
+    ) {
+        self.limitID = limitID
+        self.planType = planType
+        self.window = window
+        self.usedPercent = usedPercent
+        self.resetsAt = resetsAt
+        self.observedAt = observedAt
+    }
 }
 
 struct ParsedTokenEvent: Equatable, Sendable {

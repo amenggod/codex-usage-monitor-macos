@@ -68,19 +68,7 @@ enum UsageSchema {
             )
             """
         )
-        try database.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rate_limits (
-              window_key TEXT PRIMARY KEY,
-              limit_id TEXT NOT NULL,
-              window_minutes INTEGER NOT NULL,
-              window_label TEXT,
-              used_percent REAL NOT NULL,
-              resets_at REAL NOT NULL,
-              observed_at REAL NOT NULL
-            )
-            """
-        )
+        try createRateLimits(in: database)
         try database.execute(
             """
             CREATE TABLE IF NOT EXISTS notification_receipts (
@@ -135,17 +123,80 @@ enum UsageSchema {
             guard let value = sqlite3_column_text(statement, 1) else { return }
             cursorColumns.insert(String(cString: value))
         }
-        guard !cursorColumns.contains("boundary_fingerprint") else { return }
+        let needsBoundaryFingerprint = !cursorColumns.contains("boundary_fingerprint")
+
+        var rateLimitPrimaryKey: [(position: Int, name: String)] = []
+        try database.query("PRAGMA table_info(rate_limits)") { statement in
+            let position = Int(sqlite3_column_int(statement, 5))
+            guard position > 0,
+                  let value = sqlite3_column_text(statement, 1) else { return }
+            rateLimitPrimaryKey.append((position, String(cString: value)))
+        }
+        let primaryKeyColumns = rateLimitPrimaryKey
+            .sorted { $0.position < $1.position }
+            .map(\.name)
+        let needsRateLimitMigration = !primaryKeyColumns.isEmpty && primaryKeyColumns != [
+            "window_key",
+            "limit_id",
+            "plan_type",
+        ]
+
+        guard needsBoundaryFingerprint || needsRateLimitMigration else { return }
 
         try database.execute("BEGIN IMMEDIATE")
         do {
-            try database.execute(
-                "ALTER TABLE file_cursors ADD COLUMN boundary_fingerprint TEXT"
-            )
+            if needsBoundaryFingerprint {
+                try database.execute(
+                    "ALTER TABLE file_cursors ADD COLUMN boundary_fingerprint TEXT"
+                )
+            }
+            if needsRateLimitMigration {
+                try database.execute("ALTER TABLE rate_limits RENAME TO rate_limits_legacy")
+                try createRateLimits(in: database)
+                try database.execute(
+                    """
+                    INSERT INTO rate_limits (
+                      window_key, limit_id, plan_type, window_minutes, window_label,
+                      used_percent, resets_at, observed_at
+                    )
+                    SELECT window_key, limit_id, '', window_minutes, window_label,
+                           used_percent, resets_at, observed_at
+                    FROM rate_limits_legacy
+                    WHERE 1
+                    ON CONFLICT(window_key, limit_id, plan_type) DO UPDATE SET
+                      window_minutes = excluded.window_minutes,
+                      window_label = excluded.window_label,
+                      used_percent = excluded.used_percent,
+                      resets_at = excluded.resets_at,
+                      observed_at = excluded.observed_at
+                    WHERE excluded.observed_at >= rate_limits.observed_at
+                    """
+                )
+                try database.execute("DROP TABLE rate_limits_legacy")
+                try database.execute("DELETE FROM file_cursors")
+            }
             try database.execute("COMMIT")
         } catch {
             _ = try? database.execute("ROLLBACK")
             throw error
         }
+    }
+
+    private static func createRateLimits(in database: SQLiteDatabase) throws {
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rate_limits (
+              window_key TEXT NOT NULL,
+              limit_id TEXT NOT NULL,
+              plan_type TEXT NOT NULL,
+              window_minutes INTEGER NOT NULL,
+              window_label TEXT,
+              used_percent REAL NOT NULL,
+              resets_at REAL NOT NULL,
+              observed_at REAL NOT NULL,
+              PRIMARY KEY (window_key, limit_id, plan_type)
+            )
+            """
+        )
     }
 }

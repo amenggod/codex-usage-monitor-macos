@@ -286,15 +286,16 @@ actor UsageRepository {
         var observations: [RateLimitObservation] = []
         try database.query(
             """
-            SELECT window_key, limit_id, window_minutes, window_label,
+            SELECT window_key, limit_id, plan_type, window_minutes, window_label,
                    used_percent, resets_at, observed_at
             FROM rate_limits
-            ORDER BY window_key
+            ORDER BY window_key, limit_id, plan_type
             """
         ) { statement in
             let windowKey = Self.text(from: statement, column: 0)
-            let minutes = Int(sqlite3_column_int64(statement, 2))
-            let label = Self.optionalText(from: statement, column: 3)
+            let planType = Self.text(from: statement, column: 2)
+            let minutes = Int(sqlite3_column_int64(statement, 3))
+            let label = Self.optionalText(from: statement, column: 4)
             let window: LimitWindow = switch windowKey {
             case LimitWindow.fiveHours.storageKey:
                 .fiveHours
@@ -305,10 +306,11 @@ actor UsageRepository {
             }
             observations.append(RateLimitObservation(
                 limitID: Self.text(from: statement, column: 1),
+                planType: planType.isEmpty ? nil : planType,
                 window: window,
-                usedPercent: sqlite3_column_double(statement, 4),
-                resetsAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
-                observedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+                usedPercent: sqlite3_column_double(statement, 5),
+                resetsAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6)),
+                observedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7))
             ))
         }
         return observations
@@ -377,11 +379,10 @@ actor UsageRepository {
             try database.execute(
                 """
                 INSERT INTO rate_limits (
-                  window_key, limit_id, window_minutes, window_label,
+                  window_key, limit_id, plan_type, window_minutes, window_label,
                   used_percent, resets_at, observed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(window_key) DO UPDATE SET
-                  limit_id = excluded.limit_id,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(window_key, limit_id, plan_type) DO UPDATE SET
                   window_minutes = excluded.window_minutes,
                   window_label = excluded.window_label,
                   used_percent = excluded.used_percent,
@@ -392,6 +393,7 @@ actor UsageRepository {
                 [
                     .text(observation.window.storageKey),
                     .text(observation.limitID),
+                    .text(observation.planType ?? ""),
                     .integer(Int64(observation.window.minutes)),
                     label.map(SQLiteValue.text) ?? .null,
                     .real(observation.usedPercent),
