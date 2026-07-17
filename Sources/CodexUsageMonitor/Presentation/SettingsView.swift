@@ -131,14 +131,14 @@ struct SettingsView: View {
         Form {
             Section("显示") {
                 Toggle("显示菜单栏图标", isOn: menuBarVisibilityBinding)
-                Text("菜单栏图标可单独开关；关闭图标不会移除系统桌面小组件。")
+                Text("菜单栏图标可单独开关；若使用 Only Switch，请不要折叠该状态项。关闭图标不会移除系统桌面小组件。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("桌面小组件") {
                 Text("在桌面空白处右键，选择“编辑小组件”，搜索 Codex Usage Monitor，再添加小号或中号小组件。应用无法自动将小组件固定到桌面。")
-                Text("点击小组件会打开同一个完整面板窗口。刷新时机由 WidgetKit 决定，不保证秒级更新。")
+                Text("小组件显示最近一次有效值和更新时间；点击会打开完整面板。刷新时机由 WidgetKit 决定，不保证秒级更新。")
                 Text("主应用需在后台运行，才会监控新的 Codex 日志并将脱敏快照写入 App Group；5 小时限额缺失或过期时会自动隐藏。")
                 if let message = state.widgetSharingMessage {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
