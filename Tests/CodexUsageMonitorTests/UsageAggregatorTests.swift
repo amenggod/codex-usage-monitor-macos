@@ -177,7 +177,19 @@ struct UsageAggregatorTests {
         )
         try await repository.replaceLatestLimits([limit])
 
-        let snapshot = try await UsageAggregator(repository: repository).snapshot(
+        let liveStore = LiveRateLimitStore()
+        await liveStore.replace(
+            limits: [LimitStatus(
+                window: .fiveHours,
+                usedPercent: 42,
+                resetsAt: limit.resetsAt
+            )],
+            observedAt: now
+        )
+        let snapshot = try await UsageAggregator(
+            repository: repository,
+            limitProvider: liveStore
+        ).snapshot(
             range: .all,
             now: now,
             calendar: .current
@@ -231,7 +243,26 @@ struct UsageAggregatorTests {
         )
         try await repository.replaceLatestLimits([expiredFiveHours, activeWeek])
 
-        let snapshot = try await UsageAggregator(repository: repository).snapshot(
+        let liveStore = LiveRateLimitStore()
+        await liveStore.replace(
+            limits: [
+                LimitStatus(
+                    window: .fiveHours,
+                    usedPercent: 80,
+                    resetsAt: expiredFiveHours.resetsAt
+                ),
+                LimitStatus(
+                    window: .week,
+                    usedPercent: 52,
+                    resetsAt: activeWeek.resetsAt
+                ),
+            ],
+            observedAt: now
+        )
+        let snapshot = try await UsageAggregator(
+            repository: repository,
+            limitProvider: liveStore
+        ).snapshot(
             range: .all,
             now: now,
             calendar: .current
@@ -240,6 +271,42 @@ struct UsageAggregatorTests {
         #expect(snapshot.limits == [
             LimitStatus(window: .week, usedPercent: 52, resetsAt: activeWeek.resetsAt),
         ])
+    }
+
+    @Test
+    func liveAccountLimitOverridesOlderLogObservation() async throws {
+        let databaseURL = temporaryAggregationDatabaseURL()
+        defer { removeAggregationDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        let now = Date(timeIntervalSince1970: 2_000)
+        try await repository.replaceLatestLimits([
+            RateLimitObservation(
+                limitID: "codex",
+                planType: "prolite",
+                window: .week,
+                usedPercent: 27,
+                resetsAt: now.addingTimeInterval(86_400),
+                observedAt: now.addingTimeInterval(-3_600)
+            )
+        ])
+        let liveStore = LiveRateLimitStore()
+        await liveStore.replace(
+            limits: [LimitStatus(
+                window: .week,
+                usedPercent: 31,
+                resetsAt: now.addingTimeInterval(86_400)
+            )],
+            observedAt: now
+        )
+
+        let snapshot = try await UsageAggregator(
+            repository: repository,
+            limitProvider: liveStore
+        ).snapshot(range: .all, now: now, calendar: .current)
+
+        #expect(snapshot.limits.map(\.remainingPercent) == [69])
+        #expect(snapshot.limitFreshness == .fresh(now))
     }
 }
 

@@ -316,25 +316,27 @@ struct UsageViewModelTests {
             .success(makeSnapshot(total: 12)),
         ])
         let coordinator = CoordinatorSpy()
+        let rateLimits = RateLimitServiceSpy()
         let notifier = NotifierSpy()
         let viewModel = UsageViewModel(
             aggregator: aggregator,
             coordinator: coordinator,
+            rateLimitService: rateLimits,
             notifier: notifier
         )
         await viewModel.start()
         await settleAsyncWork()
         #expect(await aggregator.requestedRanges.count == 1)
-        #expect(await notifier.evaluations.count == 1)
+        #expect(await notifier.evaluations.isEmpty)
 
         await viewModel.selectRange(.sevenDays)
         #expect(await aggregator.requestedRanges.count == 3)
-        #expect(await notifier.evaluations.count == 2)
+        #expect(await notifier.evaluations.isEmpty)
 
         await viewModel.retry()
         await settleAsyncWork()
         #expect(await aggregator.requestedRanges.count == 5)
-        #expect(await notifier.evaluations.count == 3)
+        #expect(await notifier.evaluations.isEmpty)
 
         await viewModel.rebuildIndex()
         await settleAsyncWork()
@@ -349,7 +351,39 @@ struct UsageViewModelTests {
             .sevenDays, .today,
         ])
         #expect(await coordinator.rescanCount == 1)
+        #expect(await rateLimits.refreshCount == 1)
         #expect(await coordinator.rebuildCount == 1)
+    }
+
+    @MainActor
+    @Test func liveLimitUpdateRefreshesWithoutAFileScanAndStaleLimitsDoNotNotify() async {
+        let fresh = makeSnapshot(total: 10, limits: [makeLimit(usedPercent: 31)])
+        let stale = makeSnapshot(
+            total: 10,
+            limits: [makeLimit(usedPercent: 32)],
+            limitFreshness: .stale(Date(timeIntervalSince1970: 1_783_975_200))
+        )
+        let aggregator = AggregatorSpy([.success(fresh), .success(stale)])
+        let coordinator = CoordinatorSpy()
+        let rateLimits = RateLimitServiceSpy()
+        let notifier = NotifierSpy()
+        let viewModel = UsageViewModel(
+            aggregator: aggregator,
+            coordinator: coordinator,
+            rateLimitService: rateLimits,
+            notifier: notifier
+        )
+        await viewModel.start()
+        await settleAsyncWork()
+
+        await rateLimits.send(.stale(
+            limits: stale.limits,
+            observedAt: Date(timeIntervalSince1970: 1_783_975_200)
+        ))
+
+        #expect(await eventually { viewModel.snapshot == stale })
+        #expect(await coordinator.rescanCount == 0)
+        #expect(await notifier.evaluations == [fresh.limits])
     }
 
     @MainActor
@@ -703,6 +737,25 @@ private actor NotifierSpy: LimitNotifying {
     }
 }
 
+private actor RateLimitServiceSpy: RateLimitServicing {
+    private let stream: AsyncStream<LiveRateLimitState>
+    private let continuation: AsyncStream<LiveRateLimitState>.Continuation
+    private(set) var startCount = 0
+    private(set) var refreshCount = 0
+
+    init() {
+        let pair = AsyncStream<LiveRateLimitState>.makeStream(bufferingPolicy: .bufferingNewest(8))
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    func start() async { startCount += 1 }
+    func refresh() async { refreshCount += 1 }
+    func updates() async -> AsyncStream<LiveRateLimitState> { stream }
+    func stop() async { continuation.finish() }
+    func send(_ state: LiveRateLimitState) { continuation.yield(state) }
+}
+
 private actor FreshnessRecordingWidgetPublisher: WidgetSnapshotPublishing {
     private(set) var freshnessValues: [DataFreshness?] = []
     private(set) var rebuildingRequestCount = 0
@@ -886,7 +939,8 @@ private let testWidgetStatusDate = Date(timeIntervalSince1970: 1_784_164_800)
 private func makeSnapshot(
     range: TokenRange = .today,
     total: Int64,
-    limits: [LimitStatus] = []
+    limits: [LimitStatus] = [],
+    limitFreshness: LimitDataFreshness? = nil
 ) -> DashboardSnapshot {
     let usage = TokenUsage(
         input: total,
@@ -900,7 +954,10 @@ private func makeSnapshot(
         total: usage,
         projects: [ProjectUsage(id: "project", displayName: "Project", fullPath: nil, usage: usage)],
         limits: limits,
-        freshness: .fresh(Date(timeIntervalSince1970: 1_783_975_200))
+        freshness: .fresh(Date(timeIntervalSince1970: 1_783_975_200)),
+        limitFreshness: limitFreshness ?? (limits.isEmpty
+            ? .unavailable(lastSuccessfulAt: nil, message: "等待实时限额")
+            : .fresh(Date(timeIntervalSince1970: 1_783_975_200)))
     )
 }
 

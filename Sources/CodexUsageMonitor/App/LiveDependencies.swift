@@ -33,7 +33,20 @@ enum LiveDependencies {
                 repository: repository,
                 sender: UserNotificationSender()
             )
-            let aggregator = UsageAggregator(repository: repository)
+            let limitStore = LiveRateLimitStore()
+            let rateLimitService: any RateLimitServicing
+            if let executableURL = try? CodexExecutableLocator().executableURL() {
+                rateLimitService = CodexRateLimitService(
+                    transport: CodexAppServerTransport(executableURL: executableURL),
+                    store: limitStore
+                )
+            } else {
+                rateLimitService = NoopRateLimitService()
+            }
+            let aggregator = UsageAggregator(
+                repository: repository,
+                limitProvider: limitStore
+            )
             let widgetPublisher: any WidgetSnapshotPublishing
             do {
                 widgetPublisher = WidgetSnapshotPublisher(
@@ -49,6 +62,7 @@ enum LiveDependencies {
             return UsageViewModel(
                 aggregator: aggregator,
                 coordinator: coordinator,
+                rateLimitService: rateLimitService,
                 notifier: notifier,
                 widgetPublisher: widgetPublisher
             )

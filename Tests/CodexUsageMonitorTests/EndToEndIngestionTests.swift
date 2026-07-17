@@ -90,7 +90,9 @@ struct EndToEndIngestionTests {
         #expect(before.today.projects.map(\.displayName) == ["alpha", "beta"])
         #expect(before.all.projects.map(\.displayName) == ["alpha", "beta"])
         #expect(before.all.projects.map(\.usage.total) == [215, 135])
-        #expect(before.all.limits.map(\.remainingPercent) == [72, 48])
+        let diagnosticLimits = try await fixture.repository.latestLimits()
+        #expect(diagnosticLimits.map { 100 - $0.usedPercent } == [72, 48])
+        #expect(before.all.limits.isEmpty)
 
         try await fixture.coordinator.rebuildIndex()
 
@@ -194,7 +196,8 @@ struct EndToEndIngestionTests {
             Dictionary(uniqueKeysWithValues: initial.projects.map { ($0.displayName, $0.usage.total) })
                 == ["child-project": 20, "parent-project": 10]
         )
-        #expect(initial.limits.map(\.window) == [.week])
+        #expect(try await fixture.repository.latestLimits().map(\.window) == [.week])
+        #expect(initial.limits.isEmpty)
 
         try fixture.appendToken(
             to: childURL,

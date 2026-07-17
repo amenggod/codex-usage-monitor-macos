@@ -131,6 +131,17 @@ enum DataFreshness: Equatable, Sendable {
     case failed(String)
 }
 
+enum LimitDataFreshness: Equatable, Sendable {
+    case fresh(Date)
+    case stale(Date)
+    case unavailable(lastSuccessfulAt: Date?, message: String)
+
+    var isFresh: Bool {
+        if case .fresh = self { return true }
+        return false
+    }
+}
+
 struct ProjectUsage: Identifiable, Equatable, Sendable {
     let id: String
     let displayName: String
@@ -144,12 +155,36 @@ struct DashboardSnapshot: Equatable, Sendable {
     let projects: [ProjectUsage]
     let limits: [LimitStatus]
     let freshness: DataFreshness
+    let limitFreshness: LimitDataFreshness
+
+    init(
+        range: TokenRange,
+        total: TokenUsage,
+        projects: [ProjectUsage],
+        limits: [LimitStatus],
+        freshness: DataFreshness,
+        limitFreshness: LimitDataFreshness = .unavailable(
+            lastSuccessfulAt: nil,
+            message: "等待实时限额"
+        )
+    ) {
+        self.range = range
+        self.total = total
+        self.projects = projects
+        self.limits = limits
+        self.freshness = freshness
+        self.limitFreshness = limitFreshness
+    }
 
     static let loading = DashboardSnapshot(
         range: .today,
         total: .zero,
         projects: [],
         limits: [],
-        freshness: .loading
+        freshness: .loading,
+        limitFreshness: .unavailable(
+            lastSuccessfulAt: nil,
+            message: "等待实时限额"
+        )
     )
 }

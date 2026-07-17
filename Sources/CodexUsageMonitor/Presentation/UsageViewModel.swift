@@ -29,10 +29,13 @@ final class UsageViewModel {
 
     private let aggregator: any UsageAggregating
     private let coordinator: any IngestionControlling
+    private let rateLimitService: any RateLimitServicing
     private let notifier: any LimitNotifying
     private let widgetPublisher: (any WidgetSnapshotPublishing)?
     @ObservationIgnored
     private nonisolated(unsafe) var updateTask: Task<Void, Never>?
+    @ObservationIgnored
+    private nonisolated(unsafe) var limitUpdateTask: Task<Void, Never>?
     private var hasStarted = false
     private var lastSuccessfulAt: Date?
     private var refreshGeneration: UInt64 = 0
@@ -40,11 +43,13 @@ final class UsageViewModel {
     init(
         aggregator: any UsageAggregating,
         coordinator: any IngestionControlling,
+        rateLimitService: any RateLimitServicing = NoopRateLimitService(),
         notifier: any LimitNotifying = NoopLimitNotifier(),
         widgetPublisher: (any WidgetSnapshotPublishing)? = nil
     ) {
         self.aggregator = aggregator
         self.coordinator = coordinator
+        self.rateLimitService = rateLimitService
         self.notifier = notifier
         self.widgetPublisher = widgetPublisher
     }
@@ -53,13 +58,22 @@ final class UsageViewModel {
         guard !hasStarted else { return }
         hasStarted = true
         let updates = await coordinator.updates()
+        let limitUpdates = await rateLimitService.updates()
         updateTask = Task { [weak self] in
             for await update in updates {
                 guard !Task.isCancelled else { return }
                 await self?.handle(update)
             }
         }
+        limitUpdateTask = Task { [weak self] in
+            for await _ in limitUpdates {
+                guard !Task.isCancelled else { return }
+                await self?.refresh()
+            }
+        }
+        async let startLimits: Void = rateLimitService.start()
         await coordinator.start()
+        await startLimits
     }
 
     func selectRange(_ range: TokenRange) async {
@@ -68,7 +82,10 @@ final class UsageViewModel {
     }
 
     func retry() async {
-        await coordinator.rescanAll()
+        async let rescan: Void = coordinator.rescanAll()
+        async let refreshLimits: Void = rateLimitService.refresh()
+        await rescan
+        await refreshLimits
     }
 
     func rebuildIndex() async {
@@ -93,7 +110,8 @@ final class UsageViewModel {
                 total: snapshot.total,
                 projects: snapshot.projects,
                 limits: snapshot.limits,
-                freshness: .rebuilding(completed: completed, total: total)
+                freshness: .rebuilding(completed: completed, total: total),
+                limitFreshness: snapshot.limitFreshness
             )
             if let widgetPublisher {
                 let status = await widgetPublisher.publishRebuilding(now: .now)
@@ -137,7 +155,8 @@ final class UsageViewModel {
                     total: refreshedSnapshot.total,
                     projects: refreshedSnapshot.projects,
                     limits: refreshedSnapshot.limits,
-                    freshness: .partial(now, failedFiles: partialFailedFiles)
+                    freshness: .partial(now, failedFiles: partialFailedFiles),
+                    limitFreshness: refreshedSnapshot.limitFreshness
                 )
             } else {
                 displayedSnapshot = refreshedSnapshot
@@ -148,7 +167,9 @@ final class UsageViewModel {
                 todayTotal = refreshedTodayTotal
             }
             lastSuccessfulAt = now
-            await notifier.evaluate(displayedSnapshot.limits)
+            if displayedSnapshot.limitFreshness.isFresh {
+                await notifier.evaluate(displayedSnapshot.limits)
+            }
             guard generation == refreshGeneration, range == selectedRange else { return }
             if let widgetPublisher {
                 let status = await widgetPublisher.publish(
@@ -177,7 +198,8 @@ final class UsageViewModel {
                 total: snapshot.total,
                 projects: snapshot.projects,
                 limits: snapshot.limits,
-                freshness: .stale(lastSuccessfulAt)
+                freshness: .stale(lastSuccessfulAt),
+                limitFreshness: snapshot.limitFreshness
             )
         } else {
             snapshot = DashboardSnapshot(
@@ -185,13 +207,18 @@ final class UsageViewModel {
                 total: .zero,
                 projects: [],
                 limits: [],
-                freshness: .failed(error.localizedDescription)
+                freshness: .failed(error.localizedDescription),
+                limitFreshness: .unavailable(
+                    lastSuccessfulAt: nil,
+                    message: "实时限额不可用"
+                )
             )
         }
     }
 
     deinit {
         updateTask?.cancel()
+        limitUpdateTask?.cancel()
     }
 }
 
