@@ -1,9 +1,19 @@
+import AppKit
 import Foundation
 import Testing
 @testable import CodexUsageMonitor
 
 @Suite("MenuBarFormattingTests")
 struct MenuBarFormattingTests {
+    @MainActor
+    @Test func menuBarLabelUsesATemplateImageForWallpaperContrast() {
+        let image = MenuBarFormatter.templateImage(title: "周 62%")
+
+        #expect(image.isTemplate)
+        #expect(image.size.height == 18)
+        #expect(image.size.width > 30)
+    }
+
     @Test func freshnessSymbolsRemainAvailableForEveryState() {
         let states: [DataFreshness] = [
             .loading,

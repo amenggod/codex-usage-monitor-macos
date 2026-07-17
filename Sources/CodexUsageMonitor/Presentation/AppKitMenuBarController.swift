@@ -79,7 +79,14 @@ final class AppKitMenuBarController: NSObject, MenuBarControlling {
 
     private func refreshTitle() {
         guard let button = statusItem?.button else { return }
-        button.title = MenuBarFormatter.title(limits: model.snapshot.limits)
+        let title = MenuBarFormatter.title(limits: model.snapshot.limits)
+        let image = MenuBarFormatter.templateImage(title: title)
+        button.title = ""
+        button.image = image
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.setAccessibilityLabel(title)
+        statusItem?.length = image.size.width + 8
     }
 
     @objc

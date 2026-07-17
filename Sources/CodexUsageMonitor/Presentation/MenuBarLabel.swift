@@ -1,6 +1,30 @@
+import AppKit
 import SwiftUI
 
 enum MenuBarFormatter {
+    @MainActor
+    static func templateImage(title: String) -> NSImage {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.black,
+        ]
+        let textSize = (title as NSString).size(withAttributes: attributes)
+        let imageSize = NSSize(
+            width: ceil(textSize.width) + 4,
+            height: 18
+        )
+        let image = NSImage(size: imageSize, flipped: false) { rect in
+            let origin = NSPoint(
+                x: 2,
+                y: floor((rect.height - textSize.height) / 2)
+            )
+            (title as NSString).draw(at: origin, withAttributes: attributes)
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     static func title(limits: [LimitStatus], now: Date = .now) -> String {
         let activeLimits = UsagePresentationPolicy.activeLimits(limits: limits, now: now)
         let fiveHours = activeLimits.first { $0.window == .fiveHours }
