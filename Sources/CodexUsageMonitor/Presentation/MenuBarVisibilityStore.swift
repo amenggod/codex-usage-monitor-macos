@@ -6,6 +6,7 @@ import Observation
 final class MenuBarVisibilityStore {
     private static let key = "menuBarVisible"
     private let defaults: UserDefaults
+    private var visibilityChangeHandler: ((Bool) -> Void)?
     private(set) var isVisible: Bool
 
     init(defaults: UserDefaults = .standard) {
@@ -22,5 +23,10 @@ final class MenuBarVisibilityStore {
     func setVisible(_ visible: Bool) {
         isVisible = visible
         defaults.set(visible, forKey: Self.key)
+        visibilityChangeHandler?(visible)
+    }
+
+    func setVisibilityChangeHandler(_ handler: @escaping (Bool) -> Void) {
+        visibilityChangeHandler = handler
     }
 }

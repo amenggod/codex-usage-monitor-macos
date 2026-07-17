@@ -35,6 +35,7 @@
 		4E83E99BED1FD0475971DC8F /* TokenEventIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 578B5D2055953F593D5FADBA /* TokenEventIdentityTests.swift */; };
 		50919068B20EBFFEBED1F647 /* CodexUsageShared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A0E86976FB9BE16C5A7A0FE4 /* CodexUsageShared.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		52388D624C21326B0313318A /* TestResourceBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A0FBA476F45C8A16B9CACE8 /* TestResourceBundle.swift */; };
+		52CAFE310C1A3708E7444CBF /* AppKitMenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0151457632FCF774487E5C37 /* AppKitMenuBarController.swift */; };
 		56AC9A8C226DF5B60E86D870 /* CodexEventParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B563BBD75DC21206C771A6C0 /* CodexEventParser.swift */; };
 		57F19A1CB3002A6D82460E97 /* NotificationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8EAD05856E3A439F613EE59 /* NotificationCoordinator.swift */; };
 		5A8DDEC1402913C9C17612E2 /* TokenEventIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE4B59A7EEB11B4FB3DBFD93 /* TokenEventIdentity.swift */; };
@@ -191,6 +192,7 @@
 
 /* Begin PBXFileReference section */
 		00DD81C55968D01C4C50D9DB /* MenuBarLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarLabel.swift; sourceTree = "<group>"; };
+		0151457632FCF774487E5C37 /* AppKitMenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppKitMenuBarController.swift; sourceTree = "<group>"; };
 		0795FA6A03A82376F5857EE0 /* IngestionCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IngestionCoordinatorTests.swift; sourceTree = "<group>"; };
 		08A7CE145472EDB157C4842F /* LaunchAtLoginControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLoginControllerTests.swift; sourceTree = "<group>"; };
 		1234F98AAE06E6692AA35548 /* LoginItemMainApplicationLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginItemMainApplicationLocator.swift; sourceTree = "<group>"; };
@@ -380,6 +382,7 @@
 		51992D8F57B5F1FE1CA52C4E /* Presentation */ = {
 			isa = PBXGroup;
 			children = (
+				0151457632FCF774487E5C37 /* AppKitMenuBarController.swift */,
 				B1FB3650DE9770A11A1EEAD6 /* DashboardWindowController.swift */,
 				25FC5F35051C040F2002B78E /* FreshnessFormatter.swift */,
 				00DD81C55968D01C4C50D9DB /* MenuBarLabel.swift */,
@@ -751,6 +754,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				6DAD4FEF27C505FFB8A53C6D /* AppDelegate.swift in Sources */,
+				52CAFE310C1A3708E7444CBF /* AppKitMenuBarController.swift in Sources */,
 				F7E849403FDC0479F8A34B37 /* AppLaunchCoordinator.swift in Sources */,
 				7B81DA618F8402CA47FB213E /* AppRuntime.swift in Sources */,
 				56AC9A8C226DF5B60E86D870 /* CodexEventParser.swift in Sources */,

@@ -9,6 +9,7 @@ struct CodexUsageMonitorApp: App {
     private let dashboard: DashboardWindowController
     private let launchAtLogin: LaunchAtLoginController
     private let launchCoordinator: AppLaunchCoordinator
+    private let menuBarController: AppKitMenuBarController
 
     init() {
         let model = LiveDependencies.makeViewModel()
@@ -25,27 +26,24 @@ struct CodexUsageMonitorApp: App {
             dashboard: dashboard,
             launchAtLogin: launchAtLogin
         )
+        let menuBarController = AppKitMenuBarController(
+            model: model,
+            launchAtLogin: launchAtLogin,
+            dashboard: dashboard,
+            visibilityStore: menuBarVisibilityStore
+        )
 
         _model = State(initialValue: model)
         _menuBarVisibilityStore = State(initialValue: menuBarVisibilityStore)
         self.dashboard = dashboard
         self.launchAtLogin = launchAtLogin
         self.launchCoordinator = launchCoordinator
+        self.menuBarController = menuBarController
+        appDelegate.retainLaunchCoordinator(launchCoordinator)
+        appDelegate.retainMenuBarController(menuBarController)
     }
 
     var body: some Scene {
-        MenuBarExtra(isInserted: menuBarVisibilityBinding) {
-            UsagePopoverView(
-                model: model,
-                launchAtLogin: launchAtLogin,
-                dashboard: dashboard
-            )
-                .frame(width: 520, height: 480)
-        } label: {
-            MenuBarLabel(snapshot: model.snapshot)
-        }
-        .menuBarExtraStyle(.window)
-
         Settings {
             SettingsView(
                 model: model,
@@ -54,12 +52,5 @@ struct CodexUsageMonitorApp: App {
             )
                 .frame(width: 460, height: 360)
         }
-    }
-
-    private var menuBarVisibilityBinding: Binding<Bool> {
-        Binding(
-            get: { menuBarVisibilityStore.isVisible },
-            set: { menuBarVisibilityStore.setVisible($0) }
-        )
     }
 }

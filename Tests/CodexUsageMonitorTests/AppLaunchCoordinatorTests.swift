@@ -6,6 +6,37 @@ import Testing
 @Suite("AppLaunchCoordinatorTests")
 struct AppLaunchCoordinatorTests {
     @MainActor
+    @Test func appDelegateRetainsLaunchCoordinatorForApplicationLifetime() {
+        let delegate = AppDelegate()
+        weak var retainedCoordinator: AppLaunchCoordinator?
+
+        do {
+            let coordinator = AppLaunchCoordinator(
+                arguments: ["CodexUsageMonitor"],
+                runtime: AppRuntimeLauncherSpy(),
+                dashboard: DashboardPresenterSpy(),
+                launchAtLogin: AppLaunchAtLoginSpy()
+            )
+            retainedCoordinator = coordinator
+            delegate.retainLaunchCoordinator(coordinator)
+        }
+
+        #expect(retainedCoordinator != nil)
+        withExtendedLifetime(delegate) {}
+    }
+
+    @MainActor
+    @Test func appDelegateStartsNativeMenuBarAfterApplicationLaunch() {
+        let delegate = AppDelegate()
+        let menuBar = MenuBarControllerSpy()
+
+        delegate.retainMenuBarController(menuBar)
+        delegate.startRetainedMenuBarController()
+
+        #expect(menuBar.startCount == 1)
+    }
+
+    @MainActor
     @Test func normalLaunchStartsRuntimeAndShowsDashboardAfterApplicationLaunch() async {
         let runtime = AppRuntimeLauncherSpy()
         let dashboard = DashboardPresenterSpy()
@@ -287,6 +318,15 @@ private final class DashboardPresenterSpy: DashboardPresenting {
 
     func showDashboard() {
         showCount += 1
+    }
+}
+
+@MainActor
+private final class MenuBarControllerSpy: MenuBarControlling {
+    private(set) var startCount = 0
+
+    func start() {
+        startCount += 1
     }
 }
 
