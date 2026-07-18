@@ -9,12 +9,13 @@ struct CodexUsageMonitorApp: App {
     private let dashboard: DashboardWindowController
     private let launchAtLogin: LaunchAtLoginController
     private let launchCoordinator: AppLaunchCoordinator
-    private let menuBarController: AppKitMenuBarController
+    private let menuBarHelperCoordinator: MenuBarHelperCoordinator
 
     init() {
         let model = LiveDependencies.makeViewModel()
         let runtime = AppRuntime(starter: model)
         let launchAtLogin = LaunchAtLoginController()
+        let settings = SettingsWindowPresenter()
         let dashboard = DashboardWindowController(
             model: model,
             launchAtLogin: launchAtLogin
@@ -24,13 +25,17 @@ struct CodexUsageMonitorApp: App {
             arguments: ProcessInfo.processInfo.arguments,
             runtime: runtime,
             dashboard: dashboard,
-            launchAtLogin: launchAtLogin
-        )
-        let menuBarController = AppKitMenuBarController(
-            model: model,
             launchAtLogin: launchAtLogin,
-            dashboard: dashboard,
-            visibilityStore: menuBarVisibilityStore
+            refresher: model,
+            settings: settings
+        )
+        let helperURL = Bundle.main.bundleURL
+            .appending(path: "Contents/Library/LoginItems")
+            .appending(path: "CodexUsageMenuBar.app")
+        let menuBarHelperCoordinator = MenuBarHelperCoordinator(
+            visibilityStore: menuBarVisibilityStore,
+            launcher: WorkspaceMenuBarHelperLauncher(),
+            helperURL: helperURL
         )
 
         _model = State(initialValue: model)
@@ -38,9 +43,9 @@ struct CodexUsageMonitorApp: App {
         self.dashboard = dashboard
         self.launchAtLogin = launchAtLogin
         self.launchCoordinator = launchCoordinator
-        self.menuBarController = menuBarController
+        self.menuBarHelperCoordinator = menuBarHelperCoordinator
         appDelegate.retainLaunchCoordinator(launchCoordinator)
-        appDelegate.retainMenuBarController(menuBarController)
+        appDelegate.retainMenuBarHelperCoordinator(menuBarHelperCoordinator)
     }
 
     var body: some Scene {

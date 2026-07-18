@@ -134,6 +134,12 @@ struct SettingsView: View {
                 Text("菜单栏使用紧凑图标以适应拥挤空间；点击图标可查看完整额度。若使用 Only Switch，请不要折叠该状态项。关闭图标不会移除系统桌面小组件。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let error = menuBarVisibilityStore.launchErrorDescription {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("菜单栏助手启动失败，\(error)")
+                }
             }
 
             Section("桌面小组件") {

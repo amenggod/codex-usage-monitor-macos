@@ -7,7 +7,7 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "0.2.3"
-    CURRENT_PROJECT_VERSION: "9"
+    CURRENT_PROJECT_VERSION: "10"
 packages:
   SwiftTesting:
     url: https://github.com/swiftlang/swift-testing.git
@@ -22,7 +22,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Shared
         GENERATE_INFOPLIST_FILE: YES
         MARKETING_VERSION: "0.2.3"
-        CURRENT_PROJECT_VERSION: "9"
+        CURRENT_PROJECT_VERSION: "10"
   CodexUsageMonitor:
     type: application
     platform: macOS
@@ -63,6 +63,9 @@ targets:
       - target: CodexUsageMonitorLoginItem
         embed: false
         link: false
+      - target: CodexUsageMenuBar
+        embed: false
+        link: false
     postBuildScripts:
       - name: Embed Login Item
         basedOnDependencyAnalysis: false
@@ -71,6 +74,7 @@ targets:
           destination="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LoginItems"
           mkdir -p "$destination"
           ditto "$BUILT_PRODUCTS_DIR/CodexUsageMonitorLoginItem.app" "$destination/CodexUsageMonitorLoginItem.app"
+          ditto "$BUILT_PRODUCTS_DIR/CodexUsageMenuBar.app" "$destination/CodexUsageMenuBar.app"
   CodexUsageMonitorWidget:
     type: app-extension
     platform: macOS
@@ -123,6 +127,45 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.LoginItem
+        SKIP_INSTALL: YES
+  CodexUsageMenuBarCore:
+    type: library.static
+    platform: macOS
+    sources: [Sources/CodexUsageMenuBarCore]
+    dependencies:
+      - target: CodexUsageShared
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: NO
+        PRODUCT_NAME: CodexUsageMenuBarCore
+        SKIP_INSTALL: YES
+  CodexUsageMenuBar:
+    type: application
+    platform: macOS
+    sources: [Sources/CodexUsageMenuBar]
+    dependencies:
+      - target: CodexUsageMenuBarCore
+      - target: CodexUsageShared
+    info:
+      path: Config/MenuBar-Info.plist
+      properties:
+        CFBundleDisplayName: Codex Usage Menu Bar
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+    entitlements:
+      path: Config/CodexUsageMenuBar.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - ZD9PK3NY5Z.CodexUsageMonitor.shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.MenuBar
+        PRODUCT_NAME: CodexUsageMenuBar
+        EXECUTABLE_NAME: CodexUsageMenuBar
         SKIP_INSTALL: YES
   CodexUsageMonitorTests:
     type: bundle.unit-test

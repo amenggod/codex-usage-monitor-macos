@@ -35,6 +35,7 @@ actor WidgetSnapshotPublisher: WidgetSnapshotPublishing {
     private let aggregator: any WidgetSnapshotAggregating
     private let store: any WidgetSnapshotStoring
     private let reloader: any WidgetTimelineReloading
+    private let changePoster: any UsageSnapshotChangePosting
     private var lastFingerprint: WidgetSnapshotFingerprint?
     private var requestSequence: UInt64 = 0
     private var newestRequest: WidgetPublicationRequest?
@@ -42,11 +43,14 @@ actor WidgetSnapshotPublisher: WidgetSnapshotPublishing {
     init(
         aggregator: any WidgetSnapshotAggregating,
         store: any WidgetSnapshotStoring,
-        reloader: any WidgetTimelineReloading
+        reloader: any WidgetTimelineReloading,
+        changePoster: any UsageSnapshotChangePosting =
+            DarwinUsageSnapshotChangePoster()
     ) {
         self.aggregator = aggregator
         self.store = store
         self.reloader = reloader
+        self.changePoster = changePoster
     }
 
     func publish(now: Date, calendar: Calendar) async -> WidgetSharingStatus {
@@ -71,6 +75,7 @@ actor WidgetSnapshotPublisher: WidgetSnapshotPublishing {
             )
             let fingerprint = WidgetSnapshotFingerprint(snapshot)
             try store.write(snapshot)
+            changePoster.postSnapshotChanged()
             if fingerprint != lastFingerprint {
                 reloader.reloadUsageWidget()
                 lastFingerprint = fingerprint
@@ -102,6 +107,7 @@ actor WidgetSnapshotPublisher: WidgetSnapshotPublishing {
             )
             let fingerprint = WidgetSnapshotFingerprint(snapshot)
             try store.write(snapshot)
+            changePoster.postSnapshotChanged()
             if fingerprint != lastFingerprint {
                 reloader.reloadUsageWidget()
                 lastFingerprint = fingerprint

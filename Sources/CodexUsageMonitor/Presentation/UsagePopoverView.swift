@@ -49,16 +49,12 @@ struct UsagePopoverView: View {
     }
 
     var body: some View {
-        TimelineView(
-            .periodic(from: .now, by: UsagePresentationPolicy.refreshInterval)
-        ) { context in
-            VStack(spacing: 0) {
-                header
-                Divider()
-                dashboard(now: context.date)
-                Divider()
-                footer
-            }
+        VStack(spacing: 0) {
+            header
+            Divider()
+            dashboard(now: .now)
+            Divider()
+            footer
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .confirmationDialog(

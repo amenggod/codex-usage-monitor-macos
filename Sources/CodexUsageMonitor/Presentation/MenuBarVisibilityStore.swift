@@ -8,6 +8,7 @@ final class MenuBarVisibilityStore {
     private let defaults: UserDefaults
     private var visibilityChangeHandler: ((Bool) -> Void)?
     private(set) var isVisible: Bool
+    private(set) var launchErrorDescription: String?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -26,7 +27,11 @@ final class MenuBarVisibilityStore {
         visibilityChangeHandler?(visible)
     }
 
-    func setVisibilityChangeHandler(_ handler: @escaping (Bool) -> Void) {
+    func setVisibilityChangeHandler(_ handler: ((Bool) -> Void)?) {
         visibilityChangeHandler = handler
+    }
+
+    func setLaunchError(_ description: String?) {
+        launchErrorDescription = description
     }
 }

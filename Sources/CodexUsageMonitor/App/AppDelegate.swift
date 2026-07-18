@@ -1,10 +1,5 @@
 import AppKit
 
-@MainActor
-protocol MenuBarControlling: AnyObject {
-    func start()
-}
-
 extension Notification.Name {
     static let usageAppDidFinishLaunching = Notification.Name("usage.appDidFinishLaunching")
     static let usageAppReopenRequested = Notification.Name("usage.appReopenRequested")
@@ -14,26 +9,30 @@ extension Notification.Name {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var launchCoordinator: AppLaunchCoordinator?
-    private var menuBarController: (any MenuBarControlling)?
+    private var menuBarHelperCoordinator: (any MenuBarHelperCoordinating)?
 
     func retainLaunchCoordinator(_ coordinator: AppLaunchCoordinator) {
         launchCoordinator = coordinator
     }
 
-    func retainMenuBarController(_ controller: any MenuBarControlling) {
-        menuBarController = controller
+    func retainMenuBarHelperCoordinator(_ coordinator: any MenuBarHelperCoordinating) {
+        menuBarHelperCoordinator = coordinator
     }
 
-    func startRetainedMenuBarController() {
+    func startRetainedMenuBarHelperCoordinator() {
         DispatchQueue.main.async { [weak self] in
-            self?.menuBarController?.start()
+            self?.menuBarHelperCoordinator?.start()
         }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        startRetainedMenuBarController()
+        startRetainedMenuBarHelperCoordinator()
         NotificationCenter.default.post(name: .usageAppDidFinishLaunching, object: nil)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        menuBarHelperCoordinator?.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

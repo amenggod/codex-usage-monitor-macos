@@ -23,10 +23,6 @@ struct AppPresentationStateTests {
         )
     }
 
-    @Test func presentationTimelineRefreshesExpiredLimitsPromptly() {
-        #expect(UsagePresentationPolicy.refreshInterval <= 1)
-    }
-
     @Test func limitsExpireExactlyAtTheirResetBoundary() {
         let reset = Date(timeIntervalSince1970: 1_000)
         let limits = [

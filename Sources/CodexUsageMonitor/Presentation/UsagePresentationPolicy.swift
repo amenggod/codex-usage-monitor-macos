@@ -1,8 +1,6 @@
 import Foundation
 
 enum UsagePresentationPolicy {
-    static let refreshInterval: TimeInterval = 1
-
     static func activeLimits(
         limits: [LimitStatus],
         now: Date = .now

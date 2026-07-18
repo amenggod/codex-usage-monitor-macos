@@ -8,11 +8,25 @@ protocol AppRuntimeLaunching: AnyObject {
 extension AppRuntime: AppRuntimeLaunching {}
 
 @MainActor
+protocol UsageRefreshRequesting: AnyObject {
+    func retry() async
+}
+
+extension UsageViewModel: UsageRefreshRequesting {}
+
+@MainActor
+protocol SettingsPresenting: AnyObject {
+    func showSettings()
+}
+
+@MainActor
 final class AppLaunchCoordinator {
     private let isBackgroundLaunch: Bool
     private let runtime: any AppRuntimeLaunching
     private let dashboard: any DashboardPresenting
     private let launchAtLogin: any LaunchAtLoginServicing
+    private let refresher: any UsageRefreshRequesting
+    private let settings: any SettingsPresenting
     private let notificationCenter: NotificationCenter
     private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
 
@@ -21,12 +35,16 @@ final class AppLaunchCoordinator {
         runtime: any AppRuntimeLaunching,
         dashboard: any DashboardPresenting,
         launchAtLogin: any LaunchAtLoginServicing,
+        refresher: any UsageRefreshRequesting = NoopUsageRefreshRequester(),
+        settings: any SettingsPresenting = NoopSettingsPresenter(),
         notificationCenter: NotificationCenter = .default
     ) {
         isBackgroundLaunch = arguments.contains("--background")
         self.runtime = runtime
         self.dashboard = dashboard
         self.launchAtLogin = launchAtLogin
+        self.refresher = refresher
+        self.settings = settings
         self.notificationCenter = notificationCenter
         observers = [
             notificationCenter.addObserver(
@@ -73,11 +91,20 @@ final class AppLaunchCoordinator {
     }
 
     func handle(urls: [URL]) {
-        guard urls.contains(where: {
-            $0.absoluteString == "codexusagemonitor://dashboard"
-        }) else { return }
-
-        dashboard.showDashboard()
+        for url in urls {
+            switch url.absoluteString {
+            case "codexusagemonitor://dashboard":
+                dashboard.showDashboard()
+            case "codexusagemonitor://refresh":
+                Task { [weak self] in
+                    await self?.refresher.retry()
+                }
+            case "codexusagemonitor://settings":
+                settings.showSettings()
+            default:
+                continue
+            }
+        }
     }
 
     deinit {
@@ -85,4 +112,14 @@ final class AppLaunchCoordinator {
             notificationCenter.removeObserver(observer)
         }
     }
+}
+
+@MainActor
+private final class NoopUsageRefreshRequester: UsageRefreshRequesting {
+    func retry() async {}
+}
+
+@MainActor
+private final class NoopSettingsPresenter: SettingsPresenting {
+    func showSettings() {}
 }

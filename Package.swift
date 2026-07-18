@@ -22,7 +22,12 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "CodexUsageShared", targets: ["CodexUsageShared"]),
+        .library(
+            name: "CodexUsageMenuBarCore",
+            targets: ["CodexUsageMenuBarCore"]
+        ),
         .executable(name: "CodexUsageMonitor", targets: ["CodexUsageMonitor"]),
+        .executable(name: "CodexUsageMenuBar", targets: ["CodexUsageMenuBar"]),
     ],
     dependencies: [
         .package(
@@ -40,6 +45,23 @@ let package = Package(
             name: "CodexUsageMonitor",
             dependencies: ["CodexUsageShared"],
             linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .target(
+            name: "CodexUsageMenuBarCore",
+            dependencies: ["CodexUsageShared"]
+        ),
+        .executableTarget(
+            name: "CodexUsageMenuBar",
+            dependencies: ["CodexUsageShared", "CodexUsageMenuBarCore"]
+        ),
+        .testTarget(
+            name: "CodexUsageMenuBarCoreTests",
+            dependencies: [
+                "CodexUsageMenuBarCore",
+                "CodexUsageShared",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
+            linkerSettings: testingLinkerSettings
         ),
         .testTarget(
             name: "CodexUsageMonitorTests",

@@ -23,6 +23,16 @@ actor NoopRateLimitService: RateLimitServicing {
 }
 
 actor CodexRateLimitService: RateLimitServicing {
+    private struct ActiveRefresh {
+        let id: UInt64
+        let task: Task<Void, Never>
+    }
+
+    private struct LimitRead {
+        let limits: [LimitStatus]
+        let observedAt: Date
+    }
+
     private let transport: any CodexAppServerTransporting
     private let store: LiveRateLimitStore
     private let now: @Sendable () -> Date
@@ -30,12 +40,13 @@ actor CodexRateLimitService: RateLimitServicing {
     private let pollInterval: Duration
     private let updateStream: AsyncStream<LiveRateLimitState>
     private let updateContinuation: AsyncStream<LiveRateLimitState>.Continuation
-    private var notificationTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
     private var retryTask: Task<Void, Never>?
     private var retryIndex = 0
-    private var initialized = false
     private var started = false
+    private var stopping = false
+    private var nextRefreshID: UInt64 = 0
+    private var activeRefresh: ActiveRefresh?
 
     init(
         transport: any CodexAppServerTransporting,
@@ -59,18 +70,10 @@ actor CodexRateLimitService: RateLimitServicing {
     }
 
     func start() async {
-        guard !started else { return }
+        guard !started, !stopping else { return }
         started = true
-        let notifications = await transport.notifications()
-        notificationTask = Task { [weak self] in
-            for await data in notifications {
-                guard !Task.isCancelled else { return }
-                if CodexRateLimitProtocol.isRateLimitsUpdatedNotification(data) {
-                    await self?.refreshFromNotification()
-                }
-            }
-        }
-        await performRefresh(scheduleRetryOnFailure: true)
+        await runSingleFlightRefresh(scheduleRetryOnFailure: true)
+        guard started else { return }
         pollingTask = Task { [weak self] in
             await self?.pollUntilStopped()
         }
@@ -80,7 +83,7 @@ actor CodexRateLimitService: RateLimitServicing {
         retryTask?.cancel()
         retryTask = nil
         retryIndex = 0
-        await performRefresh(scheduleRetryOnFailure: true)
+        await runSingleFlightRefresh(scheduleRetryOnFailure: true)
     }
 
     func updates() async -> AsyncStream<LiveRateLimitState> {
@@ -88,20 +91,18 @@ actor CodexRateLimitService: RateLimitServicing {
     }
 
     func stop() async {
+        guard !stopping else { return }
+        stopping = true
         started = false
-        notificationTask?.cancel()
-        notificationTask = nil
         pollingTask?.cancel()
         pollingTask = nil
         retryTask?.cancel()
         retryTask = nil
-        initialized = false
+        activeRefresh?.task.cancel()
         await transport.stop()
+        activeRefresh = nil
         updateContinuation.finish()
-    }
-
-    private func refreshFromNotification() async {
-        await performRefresh(scheduleRetryOnFailure: true)
+        stopping = false
     }
 
     private func pollUntilStopped() async {
@@ -112,21 +113,61 @@ actor CodexRateLimitService: RateLimitServicing {
                 return
             }
             guard started, !Task.isCancelled else { return }
-            await performRefresh(scheduleRetryOnFailure: true)
+            await runSingleFlightRefresh(scheduleRetryOnFailure: true)
+        }
+    }
+
+    private func runSingleFlightRefresh(
+        scheduleRetryOnFailure: Bool
+    ) async {
+        if let activeRefresh {
+            await activeRefresh.task.value
+            return
+        }
+
+        nextRefreshID &+= 1
+        let id = nextRefreshID
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performRefresh(
+                scheduleRetryOnFailure: scheduleRetryOnFailure
+            )
+        }
+        activeRefresh = ActiveRefresh(id: id, task: task)
+        await task.value
+        if activeRefresh?.id == id {
+            activeRefresh = nil
         }
     }
 
     private func performRefresh(scheduleRetryOnFailure: Bool) async {
         do {
-            try await transport.start()
-            if !initialized {
-                _ = try await transport.request(
-                    method: "initialize",
-                    params: Self.initializeParameters,
-                    timeout: .seconds(10)
-                )
-                initialized = true
+            let read = try await readLimits()
+            await store.replace(
+                limits: read.limits,
+                observedAt: read.observedAt
+            )
+            retryTask?.cancel()
+            retryTask = nil
+            retryIndex = 0
+            updateContinuation.yield(await store.state(now: read.observedAt))
+        } catch {
+            await store.markUnavailable(message: Self.safeMessage(for: error))
+            updateContinuation.yield(await store.state(now: now()))
+            if scheduleRetryOnFailure {
+                scheduleRetry()
             }
+        }
+    }
+
+    private func readLimits() async throws -> LimitRead {
+        do {
+            try await transport.start()
+            _ = try await transport.request(
+                method: "initialize",
+                params: Self.initializeParameters,
+                timeout: .seconds(10)
+            )
             let response = try await transport.request(
                 method: "account/rateLimits/read",
                 params: nil,
@@ -145,21 +186,11 @@ actor CodexRateLimitService: RateLimitServicing {
                     resetsAt: $0.resetsAt
                 )
             }
-            await store.replace(limits: limits, observedAt: observedAt)
-            retryTask?.cancel()
-            retryTask = nil
-            retryIndex = 0
-            updateContinuation.yield(await store.state(now: observedAt))
+            await transport.stop()
+            return LimitRead(limits: limits, observedAt: observedAt)
         } catch {
-            if error is CodexAppServerTransport.TransportError {
-                await transport.stop()
-                initialized = false
-            }
-            await store.markUnavailable(message: Self.safeMessage(for: error))
-            updateContinuation.yield(await store.state(now: now()))
-            if scheduleRetryOnFailure {
-                scheduleRetry()
-            }
+            await transport.stop()
+            throw error
         }
     }
 
@@ -179,7 +210,7 @@ actor CodexRateLimitService: RateLimitServicing {
 
     private func runScheduledRetry() async {
         retryTask = nil
-        await performRefresh(scheduleRetryOnFailure: true)
+        await runSingleFlightRefresh(scheduleRetryOnFailure: true)
     }
 
     private static var initializeParameters: Data {

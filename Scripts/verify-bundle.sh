@@ -111,32 +111,51 @@ WIDGET="$APP/Contents/PlugIns/CodexUsageMonitorWidget.appex"
 WIDGET_PLIST="$WIDGET/Contents/Info.plist"
 LOGIN_ITEM="$APP/Contents/Library/LoginItems/CodexUsageMonitorLoginItem.app"
 LOGIN_ITEM_PLIST="$LOGIN_ITEM/Contents/Info.plist"
+MENU_BAR_HELPER="$APP/Contents/Library/LoginItems/CodexUsageMenuBar.app"
+MENU_BAR_HELPER_PLIST="$MENU_BAR_HELPER/Contents/Info.plist"
 SHARED_FRAMEWORK="$APP/Contents/Frameworks/CodexUsageShared.framework"
 SHARED_FRAMEWORK_PLIST="$SHARED_FRAMEWORK/Resources/Info.plist"
 LOGIN_SHARED_FRAMEWORK="$LOGIN_ITEM/Contents/Frameworks/CodexUsageShared.framework"
 LOGIN_SHARED_FRAMEWORK_PLIST="$LOGIN_SHARED_FRAMEWORK/Resources/Info.plist"
+MENU_BAR_SHARED_FRAMEWORK="$MENU_BAR_HELPER/Contents/Frameworks/CodexUsageShared.framework"
+MENU_BAR_SHARED_FRAMEWORK_PLIST="$MENU_BAR_SHARED_FRAMEWORK/Resources/Info.plist"
 
 assert_unique_bundle "$APP/Contents/PlugIns" '*.appex' "$WIDGET"
-assert_unique_bundle "$APP/Contents/Library/LoginItems" '*.app' "$LOGIN_ITEM"
+login_items_count="$(
+  find "$APP/Contents/Library/LoginItems" \
+    -mindepth 1 \
+    -maxdepth 1 \
+    -type d \
+    -name '*.app' \
+    -print |
+    wc -l |
+    tr -d '[:space:]'
+)"
+[[ "$login_items_count" == "2" ]] ||
+  fail "expected exactly two LoginItems apps (found $login_items_count)"
 assert_unique_bundle "$APP" 'CodexUsageMonitorWidget.appex' "$WIDGET"
 assert_unique_bundle "$APP" 'CodexUsageMonitorLoginItem.app' "$LOGIN_ITEM"
+assert_unique_bundle "$APP" 'CodexUsageMenuBar.app' "$MENU_BAR_HELPER"
 
 require_directory "$SHARED_FRAMEWORK"
 require_directory "$LOGIN_SHARED_FRAMEWORK"
+require_directory "$MENU_BAR_SHARED_FRAMEWORK"
 framework_count="$(
   find "$APP" -type d -name 'CodexUsageShared.framework' -print |
     wc -l |
     tr -d '[:space:]'
 )"
-[[ "$framework_count" == "2" ]] ||
-  fail "expected two embedded CodexUsageShared frameworks (found $framework_count)"
+[[ "$framework_count" == "3" ]] ||
+  fail "expected three embedded CodexUsageShared frameworks (found $framework_count)"
 
 for plist in \
   "$APP_PLIST" \
   "$WIDGET_PLIST" \
   "$LOGIN_ITEM_PLIST" \
+  "$MENU_BAR_HELPER_PLIST" \
   "$SHARED_FRAMEWORK_PLIST" \
-  "$LOGIN_SHARED_FRAMEWORK_PLIST"
+  "$LOGIN_SHARED_FRAMEWORK_PLIST" \
+  "$MENU_BAR_SHARED_FRAMEWORK_PLIST"
 do
   [[ -f "$plist" ]] || fail "missing plist: $plist"
   plutil -lint "$plist" >/dev/null || fail "invalid plist: $plist"
@@ -187,6 +206,17 @@ assert_plist_value \
   CodexUsageMonitorLoginItem
 
 assert_plist_value \
+  "$MENU_BAR_HELPER_PLIST" \
+  :CFBundleIdentifier \
+  com.amenggod.CodexUsageMonitor.MenuBar
+assert_plist_value "$MENU_BAR_HELPER_PLIST" :CFBundlePackageType APPL
+assert_plist_value \
+  "$MENU_BAR_HELPER_PLIST" \
+  :CFBundleExecutable \
+  CodexUsageMenuBar
+assert_plist_value "$MENU_BAR_HELPER_PLIST" :LSUIElement true
+
+assert_plist_value \
   "$SHARED_FRAMEWORK_PLIST" \
   :CFBundleIdentifier \
   com.amenggod.CodexUsageMonitor.Shared
@@ -194,12 +224,18 @@ assert_plist_value \
   "$LOGIN_SHARED_FRAMEWORK_PLIST" \
   :CFBundleIdentifier \
   com.amenggod.CodexUsageMonitor.Shared
+assert_plist_value \
+  "$MENU_BAR_SHARED_FRAMEWORK_PLIST" \
+  :CFBundleIdentifier \
+  com.amenggod.CodexUsageMonitor.Shared
 
 require_executable "$APP/Contents/MacOS/CodexUsageMonitor"
 require_executable "$WIDGET/Contents/MacOS/CodexUsageMonitorWidget"
 require_executable "$LOGIN_ITEM/Contents/MacOS/CodexUsageMonitorLoginItem"
+require_executable "$MENU_BAR_HELPER/Contents/MacOS/CodexUsageMenuBar"
 require_executable "$SHARED_FRAMEWORK/CodexUsageShared"
 require_executable "$LOGIN_SHARED_FRAMEWORK/CodexUsageShared"
+require_executable "$MENU_BAR_SHARED_FRAMEWORK/CodexUsageShared"
 
 marketing_version="$(plist_value "$APP_PLIST" :CFBundleShortVersionString)"
 build_version="$(plist_value "$APP_PLIST" :CFBundleVersion)"
@@ -211,8 +247,10 @@ build_version="$(plist_value "$APP_PLIST" :CFBundleVersion)"
 for plist in \
   "$WIDGET_PLIST" \
   "$LOGIN_ITEM_PLIST" \
+  "$MENU_BAR_HELPER_PLIST" \
   "$SHARED_FRAMEWORK_PLIST" \
-  "$LOGIN_SHARED_FRAMEWORK_PLIST"
+  "$LOGIN_SHARED_FRAMEWORK_PLIST" \
+  "$MENU_BAR_SHARED_FRAMEWORK_PLIST"
 do
   assert_plist_value "$plist" :CFBundleShortVersionString "$marketing_version"
   assert_plist_value "$plist" :CFBundleVersion "$build_version"
@@ -239,8 +277,10 @@ if [[ -f "$UNSIGNED_MARKER" ]]; then
     "$APP/Contents/MacOS/CodexUsageMonitor"
     "$WIDGET/Contents/MacOS/CodexUsageMonitorWidget"
     "$LOGIN_ITEM/Contents/MacOS/CodexUsageMonitorLoginItem"
+    "$MENU_BAR_HELPER/Contents/MacOS/CodexUsageMenuBar"
     "$SHARED_FRAMEWORK/CodexUsageShared"
     "$LOGIN_SHARED_FRAMEWORK/CodexUsageShared"
+    "$MENU_BAR_SHARED_FRAMEWORK/CodexUsageShared"
   )
   for path in "${validation_executables[@]}"; do
     if "$CODESIGN_BIN" \
@@ -264,10 +304,14 @@ else
     "$WIDGET/Contents/MacOS/CodexUsageMonitorWidget"
     "$LOGIN_ITEM"
     "$LOGIN_ITEM/Contents/MacOS/CodexUsageMonitorLoginItem"
+    "$MENU_BAR_HELPER"
+    "$MENU_BAR_HELPER/Contents/MacOS/CodexUsageMenuBar"
     "$SHARED_FRAMEWORK"
     "$SHARED_FRAMEWORK/CodexUsageShared"
     "$LOGIN_SHARED_FRAMEWORK"
     "$LOGIN_SHARED_FRAMEWORK/CodexUsageShared"
+    "$MENU_BAR_SHARED_FRAMEWORK"
+    "$MENU_BAR_SHARED_FRAMEWORK/CodexUsageShared"
   )
   for path in "${signed_paths[@]}"; do
     verify_signed_code "$path"
@@ -286,9 +330,14 @@ else
   widget_groups="$(
     extract_app_groups "$WIDGET" "$entitlements_tmp/widget-entitlements.plist"
   )"
+  menu_bar_groups="$(
+    extract_app_groups \
+      "$MENU_BAR_HELPER" \
+      "$entitlements_tmp/menu-bar-entitlements.plist"
+  )"
   expected_groups="[\"$EXPECTED_APP_GROUP\"]"
-  [[ "$app_groups" == "$widget_groups" ]] ||
-    fail "App Group entitlements differ between main app and Widget"
+  [[ "$app_groups" == "$widget_groups" && "$app_groups" == "$menu_bar_groups" ]] ||
+    fail "App Group entitlements differ between main app, Widget, and menu bar Helper"
   [[ "$app_groups" == "$expected_groups" ]] ||
     fail \
       "App Group entitlements are '$app_groups' (expected the single group '$EXPECTED_APP_GROUP')"

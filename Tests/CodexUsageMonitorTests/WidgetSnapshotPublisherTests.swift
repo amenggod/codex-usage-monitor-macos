@@ -77,6 +77,40 @@ struct WidgetSnapshotPublisherTests {
         #expect(store.lastSnapshot?.limitFreshness == .fresh(observedAt: observedAt))
     }
 
+    @Test func successfulSnapshotWritePostsCrossProcessChangeSignal() async {
+        let poster = SnapshotChangePosterSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([
+                makeSnapshot(range: .today, total: 12, projects: []),
+                makeSnapshot(range: .all, total: 34, projects: []),
+            ]),
+            store: WidgetStoreSpy(),
+            reloader: WidgetReloaderSpy(),
+            changePoster: poster
+        )
+
+        _ = await publisher.publish(now: testNow, calendar: testCalendar)
+
+        #expect(poster.postCount == 1)
+    }
+
+    @Test func failedSnapshotWriteDoesNotPostCrossProcessChangeSignal() async {
+        let poster = SnapshotChangePosterSpy()
+        let publisher = WidgetSnapshotPublisher(
+            aggregator: WidgetPublisherAggregatorSpy([
+                makeSnapshot(range: .today, total: 12, projects: []),
+                makeSnapshot(range: .all, total: 34, projects: []),
+            ]),
+            store: WidgetStoreSpy(writeError: WidgetStoreTestFailure()),
+            reloader: WidgetReloaderSpy(),
+            changePoster: poster
+        )
+
+        _ = await publisher.publish(now: testNow, calendar: testCalendar)
+
+        #expect(poster.postCount == 0)
+    }
+
     @Test func identicalVisibleValuesWriteFreshTimeButReloadOnlyOnce() async {
         let today = makeSnapshot(range: .today, total: 12, projects: [])
         let all = makeSnapshot(range: .all, total: 100, projects: [])
@@ -765,17 +799,20 @@ private final class WidgetStoreSpy: @unchecked Sendable, WidgetSnapshotStoring {
     private var storedSnapshots: [WidgetUsageSnapshot] = []
     private let readFailure: WidgetStoreTestFailure?
     private let writeFailure: WidgetStoreTestFailure?
+    private let writeError: Error?
 
     init(
         initialSnapshot: WidgetUsageSnapshot? = nil,
         readFailure: WidgetStoreTestFailure? = nil,
-        writeFailure: WidgetStoreTestFailure? = nil
+        writeFailure: WidgetStoreTestFailure? = nil,
+        writeError: Error? = nil
     ) {
         if let initialSnapshot {
             storedSnapshots = [initialSnapshot]
         }
         self.readFailure = readFailure
         self.writeFailure = writeFailure
+        self.writeError = writeError
     }
 
     var snapshots: [WidgetUsageSnapshot] { lock.withLock { storedSnapshots } }
@@ -787,6 +824,7 @@ private final class WidgetStoreSpy: @unchecked Sendable, WidgetSnapshotStoring {
     }
 
     func write(_ snapshot: WidgetUsageSnapshot) throws {
+        if let writeError { throw writeError }
         if let writeFailure { throw writeFailure }
         lock.withLock { storedSnapshots.append(snapshot) }
     }
@@ -798,6 +836,18 @@ private final class WidgetReloaderSpy: @unchecked Sendable, WidgetTimelineReload
     var reloadCount: Int { lock.withLock { count } }
 
     func reloadUsageWidget() {
+        lock.withLock { count += 1 }
+    }
+}
+
+private final class SnapshotChangePosterSpy: @unchecked Sendable,
+    UsageSnapshotChangePosting {
+    private let lock = NSLock()
+    private var count = 0
+
+    var postCount: Int { lock.withLock { count } }
+
+    func postSnapshotChanged() {
         lock.withLock { count += 1 }
     }
 }

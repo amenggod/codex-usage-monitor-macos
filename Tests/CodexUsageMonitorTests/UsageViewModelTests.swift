@@ -86,7 +86,11 @@ struct UsageViewModelTests {
         )
 
         await viewModel.start()
-        await settleAsyncWork()
+
+        #expect(await eventually {
+            viewModel.snapshot == expected
+                && viewModel.widgetSharingStatus == .unavailable("小组件共享不可用")
+        })
 
         #expect(viewModel.snapshot == expected)
         #expect(viewModel.widgetSharingStatus == .unavailable("小组件共享不可用"))
@@ -325,7 +329,13 @@ struct UsageViewModelTests {
             notifier: notifier
         )
         await viewModel.start()
-        await settleAsyncWork()
+
+        #expect(await eventually {
+            let requestedRangeCount = await aggregator.requestedRanges.count
+            return requestedRangeCount == 1
+                && viewModel.snapshot.total.total == 1
+                && viewModel.todayTotal.total == 1
+        })
         #expect(await aggregator.requestedRanges.count == 1)
         #expect(await notifier.evaluations.isEmpty)
 
@@ -334,12 +344,24 @@ struct UsageViewModelTests {
         #expect(await notifier.evaluations.isEmpty)
 
         await viewModel.retry()
-        await settleAsyncWork()
+
+        #expect(await eventually {
+            let requestedRangeCount = await aggregator.requestedRanges.count
+            return requestedRangeCount == 5
+                && viewModel.snapshot.total.total == 3
+                && viewModel.todayTotal.total == 11
+        })
         #expect(await aggregator.requestedRanges.count == 5)
         #expect(await notifier.evaluations.isEmpty)
 
         await viewModel.rebuildIndex()
-        await settleAsyncWork()
+
+        #expect(await eventually {
+            let requestedRangeCount = await aggregator.requestedRanges.count
+            return requestedRangeCount == 7
+                && viewModel.snapshot.total.total == 4
+                && viewModel.todayTotal.total == 12
+        })
 
         #expect(viewModel.selectedRange == .sevenDays)
         #expect(viewModel.snapshot.total.total == 4)
@@ -401,8 +423,7 @@ struct UsageViewModelTests {
         )
 
         await viewModel.start()
-        await settleAsyncWork()
-        #expect(viewModel.todayTotal.total == 12)
+        #expect(await eventually { viewModel.todayTotal.total == 12 })
 
         await viewModel.selectRange(.sevenDays)
         #expect(viewModel.snapshot.total.total == 70)

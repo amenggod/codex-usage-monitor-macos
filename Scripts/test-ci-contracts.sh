@@ -112,3 +112,5 @@ assert_contains \
   'bash Scripts/verify-bundle.sh "$archived_app"'
 
 echo "CI workflow and XcodeGen installer positive/negative contracts verified."
+
+bash "$ROOT/Scripts/test-idle-cpu-contracts.sh"

@@ -26,14 +26,14 @@ struct AppLaunchCoordinatorTests {
     }
 
     @MainActor
-    @Test func appDelegateDefersNativeMenuBarUntilAfterApplicationLaunchReturns() async {
+    @Test func appDelegateDefersMenuBarHelperUntilLaunchReturns() async {
         let delegate = AppDelegate()
-        let menuBar = MenuBarControllerSpy()
+        let helper = MenuBarHelperCoordinatorSpy()
 
-        delegate.retainMenuBarController(menuBar)
-        delegate.startRetainedMenuBarController()
+        delegate.retainMenuBarHelperCoordinator(helper)
+        delegate.startRetainedMenuBarHelperCoordinator()
 
-        #expect(menuBar.startCount == 0)
+        #expect(helper.startCount == 0)
 
         await withCheckedContinuation { continuation in
             DispatchQueue.main.async {
@@ -41,7 +41,190 @@ struct AppLaunchCoordinatorTests {
             }
         }
 
-        #expect(menuBar.startCount == 1)
+        #expect(helper.startCount == 1)
+    }
+
+    @MainActor
+    @Test func applicationTerminationStopsMenuBarHelper() {
+        let delegate = AppDelegate()
+        let helper = MenuBarHelperCoordinatorSpy()
+        delegate.retainMenuBarHelperCoordinator(helper)
+
+        delegate.applicationWillTerminate(
+            Notification(name: NSApplication.willTerminateNotification)
+        )
+
+        #expect(helper.stopCount == 1)
+    }
+
+    @MainActor
+    @Test func menuBarHelperCoordinatorStartsVisibleHelperOnce() async throws {
+        let suite = try isolatedDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let store = MenuBarVisibilityStore(defaults: suite.defaults)
+        store.setVisible(true)
+        let launcher = MenuBarHelperLauncherSpy()
+        let coordinator = MenuBarHelperCoordinator(
+            visibilityStore: store,
+            launcher: launcher,
+            helperURL: URL(fileURLWithPath: "/tmp/CodexUsageMenuBar.app")
+        )
+
+        coordinator.start()
+        await waitUntil { launcher.launchURLs.count == 1 }
+
+        #expect(launcher.launchURLs.count == 1)
+        #expect(launcher.terminatedBundleIdentifiers.isEmpty)
+    }
+
+    @MainActor
+    @Test func menuBarHelperCoordinatorStopsVisibleHelperOnce() async throws {
+        let suite = try isolatedDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let store = MenuBarVisibilityStore(defaults: suite.defaults)
+        store.setVisible(true)
+        let launcher = MenuBarHelperLauncherSpy()
+        let coordinator = MenuBarHelperCoordinator(
+            visibilityStore: store,
+            launcher: launcher,
+            helperURL: URL(fileURLWithPath: "/tmp/CodexUsageMenuBar.app")
+        )
+        coordinator.start()
+        await waitUntil { launcher.launchURLs.count == 1 }
+
+        store.setVisible(false)
+        store.setVisible(false)
+        await waitUntil { launcher.terminatedBundleIdentifiers.count == 1 }
+
+        #expect(launcher.terminatedBundleIdentifiers == [
+            MenuBarHelperCoordinator.bundleIdentifier,
+        ])
+    }
+
+    @MainActor
+    @Test func menuBarHelperCoordinatorRestartsAfterVisibilityIsReenabled() async throws {
+        let suite = try isolatedDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let store = MenuBarVisibilityStore(defaults: suite.defaults)
+        store.setVisible(true)
+        let launcher = MenuBarHelperLauncherSpy()
+        let coordinator = MenuBarHelperCoordinator(
+            visibilityStore: store,
+            launcher: launcher,
+            helperURL: URL(fileURLWithPath: "/tmp/CodexUsageMenuBar.app")
+        )
+        coordinator.start()
+        await waitUntil { launcher.launchURLs.count == 1 }
+
+        store.setVisible(false)
+        await waitUntil { launcher.terminatedBundleIdentifiers.count == 1 }
+        store.setVisible(true)
+        await waitUntil { launcher.launchURLs.count == 2 }
+
+        #expect(launcher.launchURLs.count == 2)
+        #expect(launcher.terminatedBundleIdentifiers == [
+            MenuBarHelperCoordinator.bundleIdentifier,
+        ])
+    }
+
+    @MainActor
+    @Test func menuBarHelperCoordinatorWaitsForTerminationBeforeRelaunching() async throws {
+        let suite = try isolatedDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let store = MenuBarVisibilityStore(defaults: suite.defaults)
+        store.setVisible(true)
+        let launcher = DelayedTerminationMenuBarHelperLauncherSpy()
+        let coordinator = MenuBarHelperCoordinator(
+            visibilityStore: store,
+            launcher: launcher,
+            helperURL: URL(fileURLWithPath: "/tmp/CodexUsageMenuBar.app")
+        )
+        coordinator.start()
+        await waitUntil { launcher.launchURLs.count == 1 }
+
+        store.setVisible(false)
+        await waitUntil { launcher.terminatedBundleIdentifiers.count == 1 }
+        store.setVisible(true)
+
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        #expect(launcher.launchURLs.count == 1)
+
+        launcher.completeTermination()
+        await waitUntil { launcher.launchURLs.count == 2 }
+
+        #expect(launcher.launchURLs.count == 2)
+        #expect(launcher.terminatedBundleIdentifiers == [
+            MenuBarHelperCoordinator.bundleIdentifier,
+        ])
+    }
+
+    @MainActor
+    @Test func menuBarHelperCoordinatorStartIsIdempotent() async throws {
+        let suite = try isolatedDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let store = MenuBarVisibilityStore(defaults: suite.defaults)
+        store.setVisible(true)
+        let launcher = MenuBarHelperLauncherSpy()
+        let coordinator = MenuBarHelperCoordinator(
+            visibilityStore: store,
+            launcher: launcher,
+            helperURL: URL(fileURLWithPath: "/tmp/CodexUsageMenuBar.app")
+        )
+
+        coordinator.start()
+        coordinator.start()
+        await waitUntil { launcher.launchURLs.count == 1 }
+
+        #expect(launcher.launchURLs.count == 1)
+    }
+
+    @MainActor
+    @Test func successfulHelperLaunchClearsPreviousError() async throws {
+        let suite = try isolatedDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let store = MenuBarVisibilityStore(defaults: suite.defaults)
+        store.setVisible(true)
+        let launcher = MenuBarHelperLauncherSpy(
+            launchErrors: [DashboardTestFailure(message: "无法启动菜单栏助手")]
+        )
+        let coordinator = MenuBarHelperCoordinator(
+            visibilityStore: store,
+            launcher: launcher,
+            helperURL: URL(fileURLWithPath: "/tmp/CodexUsageMenuBar.app")
+        )
+
+        coordinator.start()
+        await waitUntil { launcher.launchURLs.count == 1 }
+        #expect(store.launchErrorDescription == "无法启动菜单栏助手")
+
+        store.setVisible(true)
+        await waitUntil { launcher.launchURLs.count == 2 }
+
+        #expect(store.launchErrorDescription == nil)
+        #expect(launcher.launchURLs.count == 2)
+    }
+
+    @MainActor
+    @Test func failedHelperLaunchShowsError() async throws {
+        let suite = try isolatedDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let store = MenuBarVisibilityStore(defaults: suite.defaults)
+        store.setVisible(true)
+        let coordinator = MenuBarHelperCoordinator(
+            visibilityStore: store,
+            launcher: MenuBarHelperLauncherSpy(
+                launchErrors: [DashboardTestFailure(message: "无法启动菜单栏助手")]
+            ),
+            helperURL: URL(fileURLWithPath: "/tmp/CodexUsageMenuBar.app")
+        )
+
+        coordinator.start()
+        await waitUntil { store.launchErrorDescription != nil }
+
+        #expect(store.launchErrorDescription == "无法启动菜单栏助手")
     }
 
     @MainActor
@@ -123,13 +306,115 @@ struct AppLaunchCoordinatorTests {
     }
 
     @MainActor
-    @Test func nonExactDashboardURLsAreIgnored() {
+    @Test func helperURLsRouteDashboardRefreshAndSettings() async {
         let dashboard = DashboardPresenterSpy()
+        let refresher = UsageRefreshRequesterSpy()
+        let settings = SettingsPresenterSpy()
         let coordinator = AppLaunchCoordinator(
             arguments: [],
             runtime: AppRuntimeLauncherSpy(),
             dashboard: dashboard,
-            launchAtLogin: AppLaunchAtLoginSpy()
+            launchAtLogin: AppLaunchAtLoginSpy(),
+            refresher: refresher,
+            settings: settings
+        )
+
+        coordinator.handle(urls: [
+            URL(string: "codexusagemonitor://dashboard")!,
+            URL(string: "codexusagemonitor://refresh")!,
+            URL(string: "codexusagemonitor://settings")!,
+        ])
+        await Task.yield()
+
+        #expect(dashboard.showCount == 1)
+        #expect(refresher.refreshCount == 1)
+        #expect(settings.showCount == 1)
+    }
+
+    @MainActor
+    @Test func settingsPresenterActivatesBeforePerformingInjectedMenuCommand() {
+        var events: [String] = []
+        let command = SettingsMenuCommandPerformerSpy {
+            events.append("settings-command")
+        }
+        let presenter = SettingsWindowPresenter(
+            settingsMenuCommand: command,
+            activateApplication: {
+                events.append("activate")
+            }
+        )
+
+        presenter.showSettings()
+
+        #expect(events == ["activate", "settings-command"])
+    }
+
+    @MainActor
+    @Test func appKitSettingsCommandClicksOnlyEnabledCommaItemInFirstSubmenu() {
+        let application = NSApplication.shared
+        let previousMainMenu = application.mainMenu
+        defer { application.mainMenu = previousMainMenu }
+
+        let disabledCommaTarget = MenuItemActionTarget()
+        let nonSettingsTarget = MenuItemActionTarget()
+        let settingsTarget = MenuItemActionTarget()
+        let secondSubmenuTarget = MenuItemActionTarget()
+
+        let firstSubmenu = NSMenu()
+        firstSubmenu.autoenablesItems = false
+        firstSubmenu.addItem(menuItem(
+            keyEquivalent: ",",
+            isEnabled: false,
+            target: disabledCommaTarget
+        ))
+        firstSubmenu.addItem(menuItem(
+            keyEquivalent: "s",
+            isEnabled: true,
+            target: nonSettingsTarget
+        ))
+        firstSubmenu.addItem(menuItem(
+            keyEquivalent: ",",
+            isEnabled: true,
+            target: settingsTarget
+        ))
+
+        let secondSubmenu = NSMenu()
+        secondSubmenu.autoenablesItems = false
+        secondSubmenu.addItem(menuItem(
+            keyEquivalent: ",",
+            isEnabled: true,
+            target: secondSubmenuTarget
+        ))
+
+        let mainMenu = NSMenu()
+        let firstRootItem = NSMenuItem()
+        firstRootItem.submenu = firstSubmenu
+        mainMenu.addItem(firstRootItem)
+        let secondRootItem = NSMenuItem()
+        secondRootItem.submenu = secondSubmenu
+        mainMenu.addItem(secondRootItem)
+        application.mainMenu = mainMenu
+
+        AppKitSettingsMenuCommandPerformer().performSettingsMenuCommand()
+
+        #expect(disabledCommaTarget.performCount == 0)
+        #expect(nonSettingsTarget.performCount == 0)
+        #expect(settingsTarget.performCount == 1)
+        #expect(secondSubmenuTarget.performCount == 0)
+    }
+
+    @MainActor
+    @Test func nonExactHelperURLsAreIgnored() async {
+        let dashboard = DashboardPresenterSpy()
+        let refresher = UsageRefreshRequesterSpy()
+        let settings = SettingsPresenterSpy()
+        let coordinator = AppLaunchCoordinator(
+            arguments: [],
+            runtime: AppRuntimeLauncherSpy(),
+            dashboard: dashboard,
+            launchAtLogin: AppLaunchAtLoginSpy(),
+            refresher: refresher,
+            settings: settings
         )
         let invalidURLs = [
             "other://dashboard",
@@ -138,11 +423,16 @@ struct AppLaunchCoordinatorTests {
             "codexusagemonitor://dashboard/path",
             "codexusagemonitor://dashboard?source=widget",
             "codexusagemonitor://dashboard#widget",
+            "codexusagemonitor://refresh/path",
+            "codexusagemonitor://settings?x=1",
         ].compactMap(URL.init(string:))
 
         coordinator.handle(urls: invalidURLs)
+        await Task.yield()
 
         #expect(dashboard.showCount == 0)
+        #expect(refresher.refreshCount == 0)
+        #expect(settings.showCount == 0)
     }
 
     @MainActor
@@ -330,11 +620,124 @@ private final class DashboardPresenterSpy: DashboardPresenting {
 }
 
 @MainActor
-private final class MenuBarControllerSpy: MenuBarControlling {
+private final class UsageRefreshRequesterSpy: UsageRefreshRequesting {
+    private(set) var refreshCount = 0
+
+    func retry() async {
+        refreshCount += 1
+    }
+}
+
+@MainActor
+private final class SettingsPresenterSpy: SettingsPresenting {
+    private(set) var showCount = 0
+
+    func showSettings() {
+        showCount += 1
+    }
+}
+
+@MainActor
+private final class SettingsMenuCommandPerformerSpy: SettingsMenuCommandPerforming {
+    private let perform: () -> Void
+
+    init(perform: @escaping () -> Void) {
+        self.perform = perform
+    }
+
+    func performSettingsMenuCommand() {
+        perform()
+    }
+}
+
+@MainActor
+private final class MenuItemActionTarget: NSObject {
+    private(set) var performCount = 0
+
+    @objc func performMenuItemAction(_ sender: Any?) {
+        performCount += 1
+    }
+}
+
+@MainActor
+private func menuItem(
+    keyEquivalent: String,
+    isEnabled: Bool,
+    target: MenuItemActionTarget
+) -> NSMenuItem {
+    let item = NSMenuItem(
+        title: "not-a-localized-settings-title",
+        action: #selector(MenuItemActionTarget.performMenuItemAction(_:)),
+        keyEquivalent: keyEquivalent
+    )
+    item.target = target
+    item.isEnabled = isEnabled
+    return item
+}
+
+@MainActor
+private final class MenuBarHelperCoordinatorSpy: MenuBarHelperCoordinating {
     private(set) var startCount = 0
+    private(set) var stopCount = 0
 
     func start() {
         startCount += 1
+    }
+
+    func stop() {
+        stopCount += 1
+    }
+}
+
+@MainActor
+private final class MenuBarHelperLauncherSpy: MenuBarHelperLaunching {
+    private var launchErrors: [any Error]
+    private(set) var launchURLs: [URL] = []
+    private(set) var terminatedBundleIdentifiers: [String] = []
+
+    init(launchErrors: [any Error] = []) {
+        self.launchErrors = launchErrors
+    }
+
+    func launch(at url: URL) throws {
+        launchURLs.append(url)
+        if !launchErrors.isEmpty {
+            throw launchErrors.removeFirst()
+        }
+    }
+
+    func terminate(bundleIdentifier: String) async {
+        terminatedBundleIdentifiers.append(bundleIdentifier)
+    }
+}
+
+@MainActor
+private final class DelayedTerminationMenuBarHelperLauncherSpy: MenuBarHelperLaunching {
+    private(set) var launchURLs: [URL] = []
+    private(set) var terminatedBundleIdentifiers: [String] = []
+    private var terminationContinuation: CheckedContinuation<Void, Never>?
+
+    func launch(at url: URL) throws {
+        launchURLs.append(url)
+    }
+
+    func terminate(bundleIdentifier: String) async {
+        terminatedBundleIdentifiers.append(bundleIdentifier)
+        await withCheckedContinuation { continuation in
+            terminationContinuation = continuation
+        }
+    }
+
+    func completeTermination() {
+        terminationContinuation?.resume()
+        terminationContinuation = nil
+    }
+}
+
+@MainActor
+private func waitUntil(_ condition: () -> Bool) async {
+    for _ in 0..<100 where !condition() {
+        await Task.yield()
     }
 }
 
