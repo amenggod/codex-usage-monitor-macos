@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BASE_APP="${1:-$ROOT/dist/Codex Usage Monitor.app}"
+[[ -d "$BASE_APP" ]] || {
+  echo "usage: test-verify-bundle-signing.sh [/path/to/unsigned/app]" >&2
+  exit 1
+}
+VERIFY="$ROOT/Scripts/verify-bundle.sh"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+STUB="$TMP/codesign-stub"
+LOG="$TMP/codesign.log"
+
+cat >"$STUB" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+
+path=""
+operation="verify"
+previous_argument=""
+requirement=""
+entitlements_target=""
+strict="NO"
+for argument in "$@"; do
+  path="$argument"
+  if [[ "$previous_argument" == "-R" || "$previous_argument" == "--test-requirement" ]]; then
+    requirement="$argument"
+  fi
+  if [[ "$previous_argument" == "--entitlements" ]]; then
+    entitlements_target="$argument"
+  fi
+  case "$argument" in
+    -d*) operation="display" ;;
+    --entitlements) operation="entitlements" ;;
+    -R|--test-requirement) operation="requirement" ;;
+    --strict) strict="YES" ;;
+  esac
+  previous_argument="$argument"
+done
+printf '%s|%s\n' "$operation" "$path" >>"${CODESIGN_LOG:?}"
+
+if [[ "$operation" != "display" && "$operation" != "entitlements" && "$strict" != "YES" ]]; then
+  echo "codesign verification omitted --strict" >&2
+  exit 2
+fi
+if [[ "$operation" == "requirement" && "$requirement" != "=anchor apple generic" ]]; then
+  echo "codesign verification used the wrong Apple anchor requirement" >&2
+  exit 2
+fi
+
+profile="${SIGNING_PROFILE:?}"
+team="ZD9PK3NY5Z"
+authority="Apple Development: Fixture"
+
+if [[ "$profile" == "different-team" && "$path" == *CodexUsageMonitorWidget* ]]; then
+  team="OTHER98765"
+fi
+if [[ "$profile" == "different-helper-team" && "$path" == *CodexUsageMenuBar* ]]; then
+  team="OTHER98765"
+fi
+if [[ "$profile" == "self-signed" ]]; then
+  authority="Local Self-Signed Fixture"
+fi
+if [[ "$profile" == "nested-ad-hoc" && "$path" == *CodexUsageMonitorWidget* ]]; then
+  team="not set"
+  authority=""
+fi
+
+if [[ "$operation" == "requirement" ]]; then
+  if [[ "$profile" == "self-signed" || "$profile" == "unsigned" ]]; then
+    exit 1
+  fi
+  if [[ "$profile" == "nested-ad-hoc" && "$path" == *CodexUsageMonitorWidget* ]]; then
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "$operation" == "entitlements" ]]; then
+  if [[ "$entitlements_target" != ":-" ]]; then
+    echo "codesign entitlement extraction did not use :-" >&2
+    exit 2
+  fi
+
+  group="ZD9PK3NY5Z.CodexUsageMonitor.shared"
+  include_group="YES"
+  case "$profile" in
+    missing-entitlement)
+      if [[ "$path" == *CodexUsageMonitorWidget.appex ]]; then
+        include_group="NO"
+      fi
+      ;;
+    wrong-group)
+      group="group.com.example.WrongUsageMonitor"
+      ;;
+    whitespace-group)
+      group="ZD9PK3NY5Z.CodexUsageMonitor.shared "
+      ;;
+    app-widget-mismatch)
+      if [[ "$path" == *CodexUsageMonitorWidget.appex ]]; then
+        group="group.com.example.WidgetMismatch"
+      fi
+      ;;
+    helper-missing-entitlement)
+      if [[ "$path" == *CodexUsageMenuBar.app ]]; then
+        include_group="NO"
+      fi
+      ;;
+    helper-wrong-group)
+      if [[ "$path" == *CodexUsageMenuBar.app ]]; then
+        group="group.com.example.HelperMismatch"
+      fi
+      ;;
+  esac
+
+  if [[ "$include_group" == "YES" ]]; then
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+      '<plist version="1.0">' \
+      '<dict>' \
+      '  <key>com.apple.security.application-groups</key>' \
+      '  <array>' \
+      "    <string>$group</string>" \
+      '  </array>' \
+      '</dict>' \
+      '</plist>'
+  else
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+      '<plist version="1.0">' \
+      '<dict/>' \
+      '</plist>'
+  fi
+  exit 0
+fi
+
+if [[ "$operation" == "display" ]]; then
+  if [[ -n "$authority" ]]; then
+    echo "Authority=$authority" >&2
+  else
+    echo "Signature=adhoc" >&2
+  fi
+  echo "TeamIdentifier=$team" >&2
+  exit 0
+fi
+
+exit 0
+STUB
+chmod +x "$STUB"
+ln -s "$STUB" "$TMP/codesign"
+
+failures=0
+
+create_helper_fixture() {
+  local app="$1"
+  local login_item="$app/Contents/Library/LoginItems/CodexUsageMonitorLoginItem.app"
+  local helper="$app/Contents/Library/LoginItems/CodexUsageMenuBar.app"
+  local helper_plist="$helper/Contents/Info.plist"
+
+  ditto "$login_item" "$helper"
+  mv \
+    "$helper/Contents/MacOS/CodexUsageMonitorLoginItem" \
+    "$helper/Contents/MacOS/CodexUsageMenuBar"
+  /usr/libexec/PlistBuddy \
+    -c 'Set :CFBundleIdentifier com.amenggod.CodexUsageMonitor.MenuBar' \
+    -c 'Set :CFBundleExecutable CodexUsageMenuBar' \
+    -c 'Set :CFBundleDisplayName Codex Usage Menu Bar' \
+    -c 'Set :LSUIElement true' \
+    "$helper_plist"
+}
+
+write_unsigned_marker() {
+  local app="$1"
+  find "$app" \
+    -type f \
+    -path '*/_CodeSignature/CodeResources' \
+    -exec rm -f {} +
+  mkdir -p "$app/Contents/Resources"
+  printf '%s\n' \
+    "UNSIGNED VALIDATION BUILD — compilation and bundle-structure verification only." \
+    "This artifact has no bundle resource seal or identity-backed signature." \
+    "Mach-O executables may carry ad-hoc or linker signatures." \
+    "This artifact is not an installable, notarized release." \
+    >"$app/Contents/Resources/UNSIGNED_BUILD.txt"
+}
+
+make_fixture() {
+  local profile="$1"
+  local app="$TMP/$profile.app"
+  rm -rf "$app"
+  ditto "$BASE_APP" "$app"
+  create_helper_fixture "$app"
+  if [[ "$profile" == "unsigned" ]]; then
+    write_unsigned_marker "$app"
+  else
+    rm -f "$app/Contents/Resources/UNSIGNED_BUILD.txt"
+  fi
+
+  local helper="$app/Contents/Library/LoginItems/CodexUsageMenuBar.app"
+  local helper_plist="$helper/Contents/Info.plist"
+  case "$profile" in
+    missing-helper)
+      rm -rf "$helper"
+      ;;
+    helper-wrong-id)
+      /usr/libexec/PlistBuddy \
+        -c 'Set :CFBundleIdentifier com.example.WrongMenuBar' \
+        "$helper_plist"
+      ;;
+    helper-missing-lsui-element)
+      /usr/libexec/PlistBuddy -c 'Delete :LSUIElement' "$helper_plist"
+      ;;
+    helper-wrong-executable)
+      /usr/libexec/PlistBuddy \
+        -c 'Set :CFBundleExecutable WrongMenuBarExecutable' \
+        "$helper_plist"
+      ;;
+    helper-version-mismatch)
+      /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 999' "$helper_plist"
+      ;;
+    helper-missing-framework)
+      rm -rf "$helper/Contents/Frameworks/CodexUsageShared.framework"
+      ;;
+    extra-login-item)
+      ditto \
+        "$helper" \
+        "$app/Contents/Library/LoginItems/UnexpectedMenuBar.app"
+      ;;
+  esac
+  printf '%s\n' "$app"
+}
+
+expect_rejected() {
+  local profile="$1"
+  local app
+  app="$(make_fixture "$profile")"
+  : >"$LOG"
+  if PATH="$TMP:$PATH" \
+    CODESIGN_BIN="$STUB" \
+    CODESIGN_LOG="$LOG" \
+    SIGNING_PROFILE="$profile" \
+    bash "$VERIFY" "$app" \
+    >/dev/null 2>&1
+  then
+    echo "expected signed profile '$profile' to be rejected" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+expect_rejected self-signed
+expect_rejected nested-ad-hoc
+expect_rejected different-team
+expect_rejected missing-entitlement
+expect_rejected wrong-group
+expect_rejected whitespace-group
+expect_rejected app-widget-mismatch
+expect_rejected missing-helper
+expect_rejected helper-wrong-id
+expect_rejected helper-missing-lsui-element
+expect_rejected helper-wrong-executable
+expect_rejected helper-version-mismatch
+expect_rejected helper-missing-framework
+expect_rejected helper-missing-entitlement
+expect_rejected helper-wrong-group
+expect_rejected different-helper-team
+expect_rejected extra-login-item
+
+marked_signed_app="$(make_fixture unsigned)"
+: >"$LOG"
+if PATH="$TMP:$PATH" \
+  CODESIGN_BIN="$STUB" \
+  CODESIGN_LOG="$LOG" \
+  SIGNING_PROFILE=valid \
+  bash "$VERIFY" "$marked_signed_app" \
+  >/dev/null 2>&1
+then
+  echo "expected identity-backed code with an unsigned marker to be rejected" >&2
+  failures=$((failures + 1))
+fi
+
+valid_app="$(make_fixture valid)"
+: >"$LOG"
+if ! PATH="$TMP:$PATH" \
+  CODESIGN_BIN="$STUB" \
+  CODESIGN_LOG="$LOG" \
+  SIGNING_PROFILE=valid \
+  bash "$VERIFY" "$valid_app" \
+  >/dev/null
+then
+  echo "expected Apple identity-backed fixture to be accepted" >&2
+  failures=$((failures + 1))
+fi
+
+signed_paths=(
+  "$valid_app"
+  "$valid_app/Contents/MacOS/CodexUsageMonitor"
+  "$valid_app/Contents/PlugIns/CodexUsageMonitorWidget.appex"
+  "$valid_app/Contents/PlugIns/CodexUsageMonitorWidget.appex/Contents/MacOS/CodexUsageMonitorWidget"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMonitorLoginItem.app"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMonitorLoginItem.app/Contents/MacOS/CodexUsageMonitorLoginItem"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMenuBar.app"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMenuBar.app/Contents/MacOS/CodexUsageMenuBar"
+  "$valid_app/Contents/Frameworks/CodexUsageShared.framework"
+  "$valid_app/Contents/Frameworks/CodexUsageShared.framework/CodexUsageShared"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMonitorLoginItem.app/Contents/Frameworks/CodexUsageShared.framework"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMonitorLoginItem.app/Contents/Frameworks/CodexUsageShared.framework/CodexUsageShared"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMenuBar.app/Contents/Frameworks/CodexUsageShared.framework"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMenuBar.app/Contents/Frameworks/CodexUsageShared.framework/CodexUsageShared"
+)
+
+for path in "${signed_paths[@]}"; do
+  for operation in verify requirement display; do
+    if ! grep -Fq "$operation|$path" "$LOG"; then
+      echo "missing $operation check for signed path: $path" >&2
+      failures=$((failures + 1))
+    fi
+  done
+done
+
+entitlement_paths=(
+  "$valid_app"
+  "$valid_app/Contents/PlugIns/CodexUsageMonitorWidget.appex"
+  "$valid_app/Contents/Library/LoginItems/CodexUsageMenuBar.app"
+)
+for path in "${entitlement_paths[@]}"; do
+  if ! grep -Fq "entitlements|$path" "$LOG"; then
+    echo "missing signed entitlement extraction for: $path" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+: >"$LOG"
+unsigned_app="$(make_fixture unsigned)"
+if ! PATH="$TMP:$PATH" \
+  CODESIGN_BIN="$STUB" \
+  CODESIGN_LOG="$LOG" \
+  SIGNING_PROFILE=unsigned \
+  bash "$VERIFY" "$unsigned_app" \
+  >/dev/null
+then
+  echo "expected unsigned fixture to remain accepted" >&2
+  failures=$((failures + 1))
+fi
+if grep -q '^entitlements|' "$LOG"; then
+  echo "unsigned verification unexpectedly extracted signed entitlements" >&2
+  failures=$((failures + 1))
+fi
+
+if ! grep -q 'no bundle resource seal or identity-backed signature' \
+  "$unsigned_app/Contents/Resources/UNSIGNED_BUILD.txt"
+then
+  echo "unsigned marker does not describe the missing bundle resource seal" >&2
+  failures=$((failures + 1))
+fi
+if ! grep -q 'Mach-O executables may carry ad-hoc or linker signatures' \
+  "$unsigned_app/Contents/Resources/UNSIGNED_BUILD.txt"
+then
+  echo "unsigned marker does not allow ad-hoc/linker Mach-O signatures" >&2
+  failures=$((failures + 1))
+fi
+
+((failures == 0)) || exit 1
+echo "Signed and unsigned bundle verification contracts passed."

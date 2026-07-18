@@ -23,13 +23,19 @@ actor NoopLimitNotifier: LimitNotifying {
 @Observable
 final class UsageViewModel {
     private(set) var snapshot: DashboardSnapshot = .loading
+    private(set) var todayTotal: TokenUsage = .zero
     private(set) var selectedRange: TokenRange = .today
+    private(set) var widgetSharingStatus: WidgetSharingStatus?
 
     private let aggregator: any UsageAggregating
     private let coordinator: any IngestionControlling
+    private let rateLimitService: any RateLimitServicing
     private let notifier: any LimitNotifying
+    private let widgetPublisher: (any WidgetSnapshotPublishing)?
     @ObservationIgnored
     private nonisolated(unsafe) var updateTask: Task<Void, Never>?
+    @ObservationIgnored
+    private nonisolated(unsafe) var limitUpdateTask: Task<Void, Never>?
     private var hasStarted = false
     private var lastSuccessfulAt: Date?
     private var refreshGeneration: UInt64 = 0
@@ -37,24 +43,37 @@ final class UsageViewModel {
     init(
         aggregator: any UsageAggregating,
         coordinator: any IngestionControlling,
-        notifier: any LimitNotifying = NoopLimitNotifier()
+        rateLimitService: any RateLimitServicing = NoopRateLimitService(),
+        notifier: any LimitNotifying = NoopLimitNotifier(),
+        widgetPublisher: (any WidgetSnapshotPublishing)? = nil
     ) {
         self.aggregator = aggregator
         self.coordinator = coordinator
+        self.rateLimitService = rateLimitService
         self.notifier = notifier
+        self.widgetPublisher = widgetPublisher
     }
 
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
         let updates = await coordinator.updates()
+        let limitUpdates = await rateLimitService.updates()
         updateTask = Task { [weak self] in
             for await update in updates {
                 guard !Task.isCancelled else { return }
                 await self?.handle(update)
             }
         }
+        limitUpdateTask = Task { [weak self] in
+            for await _ in limitUpdates {
+                guard !Task.isCancelled else { return }
+                await self?.refresh()
+            }
+        }
+        async let startLimits: Void = rateLimitService.start()
         await coordinator.start()
+        await startLimits
     }
 
     func selectRange(_ range: TokenRange) async {
@@ -63,7 +82,10 @@ final class UsageViewModel {
     }
 
     func retry() async {
-        await coordinator.rescanAll()
+        async let rescan: Void = coordinator.rescanAll()
+        async let refreshLimits: Void = rateLimitService.refresh()
+        await rescan
+        await refreshLimits
     }
 
     func rebuildIndex() async {
@@ -78,12 +100,34 @@ final class UsageViewModel {
         switch update {
         case .completed:
             await refresh()
+        case let .partial(failedFiles):
+            await refresh(partialFailedFiles: failedFiles)
+        case let .rebuilding(completed, total):
+            refreshGeneration &+= 1
+            let generation = refreshGeneration
+            snapshot = DashboardSnapshot(
+                range: selectedRange,
+                total: snapshot.total,
+                projects: snapshot.projects,
+                limits: snapshot.limits,
+                freshness: .rebuilding(completed: completed, total: total),
+                limitFreshness: snapshot.limitFreshness
+            )
+            if let widgetPublisher {
+                let status = await widgetPublisher.publishRebuilding(now: .now)
+                guard generation == refreshGeneration else { return }
+                widgetSharingStatus = status
+            }
         case let .failed(message):
             invalidateRefreshAndApply(IngestionFailure(message: message))
         }
     }
 
-    private func refresh(now: Date = .now, calendar: Calendar = .current) async {
+    private func refresh(
+        now: Date = .now,
+        calendar: Calendar = .current,
+        partialFailedFiles: Int? = nil
+    ) async {
         let range = selectedRange
         refreshGeneration &+= 1
         let generation = refreshGeneration
@@ -94,10 +138,48 @@ final class UsageViewModel {
                 now: now,
                 calendar: calendar
             )
+            let refreshedTodayTotal: TokenUsage?
+            if range == .today {
+                refreshedTodayTotal = refreshedSnapshot.total
+            } else {
+                refreshedTodayTotal = try? await aggregator.snapshot(
+                    range: .today,
+                    now: now,
+                    calendar: calendar
+                ).total
+            }
+            let displayedSnapshot: DashboardSnapshot
+            if let partialFailedFiles {
+                displayedSnapshot = DashboardSnapshot(
+                    range: refreshedSnapshot.range,
+                    total: refreshedSnapshot.total,
+                    projects: refreshedSnapshot.projects,
+                    limits: refreshedSnapshot.limits,
+                    freshness: .partial(now, failedFiles: partialFailedFiles),
+                    limitFreshness: refreshedSnapshot.limitFreshness
+                )
+            } else {
+                displayedSnapshot = refreshedSnapshot
+            }
             guard generation == refreshGeneration, range == selectedRange else { return }
-            snapshot = refreshedSnapshot
+            snapshot = displayedSnapshot
+            if let refreshedTodayTotal {
+                todayTotal = refreshedTodayTotal
+            }
             lastSuccessfulAt = now
-            await notifier.evaluate(refreshedSnapshot.limits)
+            if displayedSnapshot.limitFreshness.isFresh {
+                await notifier.evaluate(displayedSnapshot.limits)
+            }
+            guard generation == refreshGeneration, range == selectedRange else { return }
+            if let widgetPublisher {
+                let status = await widgetPublisher.publish(
+                    now: now,
+                    calendar: calendar,
+                    freshness: displayedSnapshot.freshness
+                )
+                guard generation == refreshGeneration, range == selectedRange else { return }
+                widgetSharingStatus = status
+            }
         } catch {
             guard generation == refreshGeneration, range == selectedRange else { return }
             apply(error)
@@ -116,7 +198,8 @@ final class UsageViewModel {
                 total: snapshot.total,
                 projects: snapshot.projects,
                 limits: snapshot.limits,
-                freshness: .stale(lastSuccessfulAt)
+                freshness: .stale(lastSuccessfulAt),
+                limitFreshness: snapshot.limitFreshness
             )
         } else {
             snapshot = DashboardSnapshot(
@@ -124,13 +207,18 @@ final class UsageViewModel {
                 total: .zero,
                 projects: [],
                 limits: [],
-                freshness: .failed(error.localizedDescription)
+                freshness: .failed(error.localizedDescription),
+                limitFreshness: .unavailable(
+                    lastSuccessfulAt: nil,
+                    message: "实时限额不可用"
+                )
             )
         }
     }
 
     deinit {
         updateTask?.cancel()
+        limitUpdateTask?.cancel()
     }
 }
 

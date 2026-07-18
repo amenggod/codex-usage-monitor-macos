@@ -1,27 +1,58 @@
 import AppKit
+import Observation
 import SwiftUI
+
+@MainActor
+@Observable
+final class LaunchAtLoginPromptState {
+    private let launchAtLogin: any LaunchAtLoginServicing
+    private(set) var errorDescription: String?
+
+    init(launchAtLogin: any LaunchAtLoginServicing) {
+        self.launchAtLogin = launchAtLogin
+        errorDescription = launchAtLogin.lastErrorDescription
+    }
+
+    @discardableResult
+    func enable() -> Bool {
+        do {
+            let enabled = try launchAtLogin.applyUserPreference(enabled: true)
+            errorDescription = launchAtLogin.lastErrorDescription
+            return enabled
+        } catch {
+            errorDescription = launchAtLogin.lastErrorDescription ?? error.localizedDescription
+            return launchAtLogin.isEnabled
+        }
+    }
+}
 
 @MainActor
 struct UsagePopoverView: View {
     @Bindable var model: UsageViewModel
-    private let launchAtLogin: any LaunchAtLoginServicing
+    let launchAtLogin: any LaunchAtLoginServicing
+    private let dashboard: (any DashboardPresenting)?
     @AppStorage("didAskLaunchAtLogin") private var didAskLaunchAtLogin = false
     @State private var showLaunchAtLoginPrompt = false
-    @State private var launchPromptError: String?
+    @State private var launchPromptState: LaunchAtLoginPromptState
 
     init(
         model: UsageViewModel,
-        launchAtLogin: any LaunchAtLoginServicing = LaunchAtLoginController()
+        launchAtLogin: any LaunchAtLoginServicing,
+        dashboard: (any DashboardPresenting)? = nil
     ) {
         self.model = model
         self.launchAtLogin = launchAtLogin
+        self.dashboard = dashboard
+        _launchPromptState = State(initialValue: LaunchAtLoginPromptState(
+            launchAtLogin: launchAtLogin
+        ))
     }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            dashboard
+            dashboard(now: .now)
             Divider()
             footer
         }
@@ -66,12 +97,20 @@ struct UsagePopoverView: View {
         .padding(16)
     }
 
-    private var dashboard: some View {
-        ScrollView {
+    private func dashboard(now: Date) -> some View {
+        let activeLimits = UsagePresentationPolicy.activeLimits(
+            limits: model.snapshot.limits,
+            now: now
+        )
+
+        return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
-                    ForEach(knownWindows, id: \.storageKey) { window in
-                        if let status = model.snapshot.limits.first(where: { $0.window == window }) {
+                    ForEach(
+                        UsagePresentationPolicy.visibleWindows(limits: activeLimits, now: now),
+                        id: \.storageKey
+                    ) { window in
+                        if let status = activeLimits.first(where: { $0.window == window }) {
                             LimitCard(status: status)
                         } else {
                             MissingLimitCard(window: window)
@@ -123,13 +162,28 @@ struct UsagePopoverView: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Label(freshnessText, systemImage: freshnessSymbol)
+            Label(
+                FreshnessFormatter.text(for: model.snapshot.freshness),
+                systemImage: FreshnessFormatter.symbol(for: model.snapshot.freshness)
+            )
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .accessibilityLabel("数据状态，\(freshnessText)")
+                .labelStyle(.titleAndIcon)
+                .lineLimit(2)
+                .accessibilityLabel(
+                    "数据状态，\(FreshnessFormatter.text(for: model.snapshot.freshness))"
+                )
 
-            if let launchPromptError {
+            Label(
+                LimitFreshnessFormatter.text(for: model.snapshot.limitFreshness),
+                systemImage: LimitFreshnessFormatter.symbol(for: model.snapshot.limitFreshness)
+            )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+
+            if let launchPromptError = launchPromptState.errorDescription {
                 Text(launchPromptError)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -139,31 +193,43 @@ struct UsagePopoverView: View {
 
             Spacer()
 
+            if let dashboard {
+                Button {
+                    dashboard.showDashboard()
+                } label: {
+                    Label("打开完整统计", systemImage: "macwindow")
+                }
+                .help("打开完整统计")
+            }
+
             Button {
                 Task { await model.retry() }
             } label: {
                 Label("重试", systemImage: "arrow.clockwise")
             }
-            .help("重新扫描 Codex 会话")
+            .labelStyle(.iconOnly)
+            .help("刷新 Token 统计与实时限额")
 
             Button {
                 Task { await model.rebuildIndex() }
             } label: {
                 Label("重建", systemImage: "arrow.triangle.2.circlepath")
             }
+            .labelStyle(.iconOnly)
             .help("清空本地索引并重新构建")
 
             SettingsLink {
                 Label("Settings", systemImage: "gearshape")
             }
+            .labelStyle(.iconOnly)
 
             Button {
                 NSApplication.shared.terminate(nil)
             } label: {
                 Label("Quit", systemImage: "power")
             }
+            .labelStyle(.iconOnly)
         }
-        .labelStyle(.iconOnly)
         .buttonStyle(.borderless)
         .padding(12)
     }
@@ -175,48 +241,9 @@ struct UsagePopoverView: View {
         )
     }
 
-    private var knownWindows: [LimitWindow] {
-        [.fiveHours, .week]
-    }
-
-    private var freshnessText: String {
-        switch model.snapshot.freshness {
-        case .loading:
-            "正在读取本地用量…"
-        case let .fresh(date):
-            "更新于 \(date.formatted(date: .omitted, time: .shortened))"
-        case let .stale(date):
-            "数据可能已过期 · \(date.formatted(date: .omitted, time: .shortened))"
-        case .noData:
-            "尚无本地用量数据"
-        case let .failed(message):
-            "读取失败：\(message)"
-        }
-    }
-
-    private var freshnessSymbol: String {
-        switch model.snapshot.freshness {
-        case .loading:
-            "clock"
-        case .fresh:
-            "checkmark.circle"
-        case .stale:
-            "exclamationmark.arrow.triangle.2.circlepath"
-        case .noData:
-            "tray"
-        case .failed:
-            "exclamationmark.triangle"
-        }
-    }
-
     private func enableLaunchAtLoginFromPrompt() {
         didAskLaunchAtLogin = true
-        do {
-            try launchAtLogin.setEnabled(true)
-            launchPromptError = nil
-        } catch {
-            launchPromptError = error.localizedDescription
-        }
+        launchPromptState.enable()
     }
 }
 

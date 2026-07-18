@@ -1,0 +1,200 @@
+name: CodexUsageMonitor
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.2.3"
+    CURRENT_PROJECT_VERSION: "10"
+packages:
+  SwiftTesting:
+    url: https://github.com/swiftlang/swift-testing.git
+    revision: swift-6.3.2-RELEASE
+targets:
+  CodexUsageShared:
+    type: framework
+    platform: macOS
+    sources: [Sources/CodexUsageShared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Shared
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "0.2.3"
+        CURRENT_PROJECT_VERSION: "10"
+  CodexUsageMonitor:
+    type: application
+    platform: macOS
+    sources: [Sources/CodexUsageMonitor]
+    info:
+      path: Config/App-Info.plist
+      properties:
+        CFBundleDevelopmentRegion: zh_CN
+        CFBundleDisplayName: Codex Usage Monitor
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: Codex Usage Monitor
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSUIElement: true
+        NSHighResolutionCapable: true
+        CFBundleURLTypes:
+          - CFBundleURLName: Codex Usage Monitor Dashboard
+            CFBundleURLSchemes: [codexusagemonitor]
+    entitlements:
+      path: Config/CodexUsageMonitor.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - ZD9PK3NY5Z.CodexUsageMonitor.shared
+    settings:
+      base:
+        PRODUCT_NAME: Codex Usage Monitor
+        EXECUTABLE_NAME: CodexUsageMonitor
+        PRODUCT_MODULE_NAME: CodexUsageMonitor
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor
+    dependencies:
+      - target: CodexUsageShared
+      - target: CodexUsageMonitorWidget
+        embed: true
+      - target: CodexUsageMonitorLoginItem
+        embed: false
+        link: false
+      - target: CodexUsageMenuBar
+        embed: false
+        link: false
+    postBuildScripts:
+      - name: Embed Login Item
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          destination="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LoginItems"
+          mkdir -p "$destination"
+          ditto "$BUILT_PRODUCTS_DIR/CodexUsageMonitorLoginItem.app" "$destination/CodexUsageMonitorLoginItem.app"
+          ditto "$BUILT_PRODUCTS_DIR/CodexUsageMenuBar.app" "$destination/CodexUsageMenuBar.app"
+  CodexUsageMonitorWidget:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/CodexUsageMonitorWidget
+        optional: true
+    info:
+      path: Config/Widget-Info.plist
+      properties:
+        CFBundleDisplayName: Codex Usage Widget
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundlePackageType: XPC!
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Config/CodexUsageMonitorWidget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - ZD9PK3NY5Z.CodexUsageMonitor.shared
+    dependencies:
+      - target: CodexUsageShared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.Widget
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WIDGET_EXTENSION
+  CodexUsageMonitorLoginItem:
+    type: application
+    platform: macOS
+    sources: [Sources/CodexUsageMonitorLoginItem]
+    dependencies:
+      - target: CodexUsageShared
+    info:
+      path: Config/LoginItem-Info.plist
+      properties:
+        CFBundleDisplayName: Codex Usage Monitor Login Item
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.LoginItem
+        SKIP_INSTALL: YES
+  CodexUsageMenuBarCore:
+    type: library.static
+    platform: macOS
+    sources: [Sources/CodexUsageMenuBarCore]
+    dependencies:
+      - target: CodexUsageShared
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: NO
+        PRODUCT_NAME: CodexUsageMenuBarCore
+        SKIP_INSTALL: YES
+  CodexUsageMenuBar:
+    type: application
+    platform: macOS
+    sources: [Sources/CodexUsageMenuBar]
+    dependencies:
+      - target: CodexUsageMenuBarCore
+      - target: CodexUsageShared
+    info:
+      path: Config/MenuBar-Info.plist
+      properties:
+        CFBundleDisplayName: Codex Usage Menu Bar
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+    entitlements:
+      path: Config/CodexUsageMenuBar.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - ZD9PK3NY5Z.CodexUsageMonitor.shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.amenggod.CodexUsageMonitor.MenuBar
+        PRODUCT_NAME: CodexUsageMenuBar
+        EXECUTABLE_NAME: CodexUsageMenuBar
+        SKIP_INSTALL: YES
+  CodexUsageMonitorTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/CodexUsageMonitorTests
+        excludes: [Fixtures]
+      - path: Tests/CodexUsageSharedTests
+      - path: Tests/CodexUsageMonitorWidgetTests
+      - path: Sources/CodexUsageMonitorWidget
+      - path: Tests/CodexUsageMonitorTests/Fixtures
+        buildPhase: resources
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: ""
+        BUNDLE_LOADER: ""
+        LD_RUNPATH_SEARCH_PATHS: '$(inherited) "@loader_path/../../../Codex Usage Monitor.app/Contents/MacOS"'
+        OTHER_LDFLAGS: '$(inherited) "$(BUILT_PRODUCTS_DIR)/Codex Usage Monitor.app/Contents/MacOS/CodexUsageMonitor.debug.dylib"'
+    dependencies:
+      - target: CodexUsageMonitor
+      - target: CodexUsageShared
+      - package: SwiftTesting
+        product: Testing
+schemes:
+  CodexUsageMonitorTests:
+    build:
+      targets:
+        CodexUsageMonitorTests: [test]
+    test:
+      targets:
+        - CodexUsageMonitorTests

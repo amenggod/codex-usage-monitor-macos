@@ -5,6 +5,25 @@ import Testing
 
 @Suite("NotificationCoordinatorTests")
 struct NotificationCoordinatorTests {
+    @Test func filteredExpiredLimitsDoNotSendNotifications() async throws {
+        let database = try TemporaryNotificationDatabase()
+        try await database.repository.migrate()
+        let sender = NotificationSenderSpy()
+        let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+        let now = Date(timeIntervalSince1970: 2_000)
+        let expired = RateLimitObservation(
+            limitID: "codex",
+            window: .fiveHours,
+            usedPercent: 95,
+            resetsAt: now,
+            observedAt: now.addingTimeInterval(-100)
+        )
+
+        await coordinator.evaluate(LimitAvailabilityPolicy.activeStatuses(from: [expired], now: now))
+
+        #expect(await sender.attemptedThresholds.isEmpty)
+    }
+
     @Test func thresholdsAreStrictAndTwentyPrecedesTen() async throws {
         let database = try TemporaryNotificationDatabase()
         try await database.repository.migrate()
@@ -49,6 +68,83 @@ struct NotificationCoordinatorTests {
         ])
 
         #expect(await sender.sentThresholds == [20, 10, 20, 10])
+    }
+
+    @Test func sameLimitIDAndResetRemainIdempotent() async throws {
+        let database = try TemporaryNotificationDatabase()
+        try await database.repository.migrate()
+        let sender = NotificationSenderSpy()
+        let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+        let limit = LimitStatus(
+            limitID: "account-a",
+            window: .fiveHours,
+            usedPercent: 81,
+            resetsAt: Date(timeIntervalSince1970: 2_500)
+        )
+
+        await coordinator.evaluate([limit])
+        await coordinator.evaluate([limit])
+
+        #expect(await sender.sentThresholds == [20])
+    }
+
+    @Test func differentLimitIDsWithSameWindowAndResetAreBothEligible() async throws {
+        let database = try TemporaryNotificationDatabase()
+        try await database.repository.migrate()
+        let sender = NotificationSenderSpy()
+        let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+        let reset = Date(timeIntervalSince1970: 2_600)
+
+        await coordinator.evaluate([
+            LimitStatus(
+                limitID: "account-a",
+                window: .fiveHours,
+                usedPercent: 81,
+                resetsAt: reset
+            ),
+        ])
+        await coordinator.evaluate([
+            LimitStatus(
+                limitID: "account-b",
+                window: .fiveHours,
+                usedPercent: 81,
+                resetsAt: reset
+            ),
+        ])
+
+        #expect(await sender.sentThresholds == [20, 20])
+    }
+
+    @Test func legacyReceiptIsClaimedOnlyByFirstNewLimitID() async throws {
+        let database = try TemporaryNotificationDatabase()
+        try await database.repository.migrate()
+        let legacyKey = "five-hours|2700|20"
+        try await database.repository.markNotificationSent(
+            legacyKey,
+            sentAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let sender = NotificationSenderSpy()
+        let coordinator = NotificationCoordinator(repository: database.repository, sender: sender)
+        let reset = Date(timeIntervalSince1970: 2_700)
+        let first = LimitStatus(
+            limitID: "account-a",
+            window: .fiveHours,
+            usedPercent: 81,
+            resetsAt: reset
+        )
+        let second = LimitStatus(
+            limitID: "account-b",
+            window: .fiveHours,
+            usedPercent: 81,
+            resetsAt: reset
+        )
+
+        await coordinator.evaluate([first])
+        await coordinator.evaluate([second])
+        await coordinator.evaluate([first])
+
+        #expect(await sender.sentThresholds == [20])
+        #expect(try await !database.repository.notificationWasSent(legacyKey))
     }
 
     @Test func coordinatorRebuildPreservesReceiptAndNewResetStillSends() async throws {
@@ -216,7 +312,14 @@ struct NotificationCoordinatorTests {
 
         #expect(await sender.attemptedThresholds == [20])
         #expect(await sender.sentThresholds == [20])
-        #expect(try await database.repository.notificationWasSent("five-hours|9000|20"))
+        #expect(try await database.repository.notificationWasSent(
+            NotificationCoordinator.receiptKey(
+                limitID: limit.limitID,
+                window: limit.window,
+                resetsAt: reset,
+                threshold: 20
+            )
+        ))
     }
 
     @Test func failedInFlightSendReleasesReceiptForLaterRetry() async throws {
@@ -238,13 +341,19 @@ struct NotificationCoordinatorTests {
 
         await sender.resumeSend()
         await firstEvaluation.value
-        #expect(try await !database.repository.notificationWasSent("five-hours|10000|20"))
+        let receiptKey = NotificationCoordinator.receiptKey(
+            limitID: limit.limitID,
+            window: limit.window,
+            resetsAt: reset,
+            threshold: 20
+        )
+        #expect(try await !database.repository.notificationWasSent(receiptKey))
 
         await coordinator.evaluate([limit])
 
         #expect(await sender.attemptedThresholds == [20, 20])
         #expect(await sender.sentThresholds == [20])
-        #expect(try await database.repository.notificationWasSent("five-hours|10000|20"))
+        #expect(try await database.repository.notificationWasSent(receiptKey))
     }
 
     @Test func concurrentDifferentWindowKeysBothSend() async throws {
@@ -270,8 +379,22 @@ struct NotificationCoordinatorTests {
 
         #expect(await sender.attemptedThresholds == [20, 20])
         #expect(await sender.sentThresholds == [20, 20])
-        #expect(try await database.repository.notificationWasSent("five-hours|11000|20"))
-        #expect(try await database.repository.notificationWasSent("week|11000|20"))
+        #expect(try await database.repository.notificationWasSent(
+            NotificationCoordinator.receiptKey(
+                limitID: fiveHourLimit.limitID,
+                window: fiveHourLimit.window,
+                resetsAt: reset,
+                threshold: 20
+            )
+        ))
+        #expect(try await database.repository.notificationWasSent(
+            NotificationCoordinator.receiptKey(
+                limitID: weekLimit.limitID,
+                window: weekLimit.window,
+                resetsAt: reset,
+                threshold: 20
+            )
+        ))
     }
 
     @Test func explicitDeniedAuthorizationKeepsSettingFalseWithoutAutomaticReprompt() async throws {
@@ -538,7 +661,12 @@ private func appendNotificationLimit(reset: Int, to url: URL) throws {
 
 private func notificationLimitStatuses(repository: UsageRepository) async throws -> [LimitStatus] {
     try await repository.latestLimits().map {
-        LimitStatus(window: $0.window, usedPercent: $0.usedPercent, resetsAt: $0.resetsAt)
+        LimitStatus(
+            limitID: $0.limitID,
+            window: $0.window,
+            usedPercent: $0.usedPercent,
+            resetsAt: $0.resetsAt
+        )
     }
 }
 

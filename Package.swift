@@ -20,7 +20,15 @@ let testingLinkerSettings: [LinkerSetting] = FileManager.default.fileExists(
 let package = Package(
     name: "CodexUsageMonitor",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "CodexUsageMonitor", targets: ["CodexUsageMonitor"])],
+    products: [
+        .library(name: "CodexUsageShared", targets: ["CodexUsageShared"]),
+        .library(
+            name: "CodexUsageMenuBarCore",
+            targets: ["CodexUsageMenuBarCore"]
+        ),
+        .executable(name: "CodexUsageMonitor", targets: ["CodexUsageMonitor"]),
+        .executable(name: "CodexUsageMenuBar", targets: ["CodexUsageMenuBar"]),
+    ],
     dependencies: [
         .package(
             url: "https://github.com/swiftlang/swift-testing.git",
@@ -28,17 +36,58 @@ let package = Package(
         )
     ],
     targets: [
+        .target(name: "CodexUsageShared"),
+        .target(
+            name: "CodexUsageMonitorWidget",
+            dependencies: ["CodexUsageShared"]
+        ),
         .executableTarget(
             name: "CodexUsageMonitor",
+            dependencies: ["CodexUsageShared"],
             linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .target(
+            name: "CodexUsageMenuBarCore",
+            dependencies: ["CodexUsageShared"]
+        ),
+        .executableTarget(
+            name: "CodexUsageMenuBar",
+            dependencies: ["CodexUsageShared", "CodexUsageMenuBarCore"]
+        ),
+        .testTarget(
+            name: "CodexUsageMenuBarCoreTests",
+            dependencies: [
+                "CodexUsageMenuBarCore",
+                "CodexUsageShared",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
+            linkerSettings: testingLinkerSettings
         ),
         .testTarget(
             name: "CodexUsageMonitorTests",
             dependencies: [
                 "CodexUsageMonitor",
+                "CodexUsageShared",
                 .product(name: "Testing", package: "swift-testing")
             ],
             resources: [.copy("Fixtures")],
+            linkerSettings: testingLinkerSettings
+        ),
+        .testTarget(
+            name: "CodexUsageSharedTests",
+            dependencies: [
+                "CodexUsageShared",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
+            linkerSettings: testingLinkerSettings
+        ),
+        .testTarget(
+            name: "CodexUsageMonitorWidgetTests",
+            dependencies: [
+                "CodexUsageMonitorWidget",
+                "CodexUsageShared",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
             linkerSettings: testingLinkerSettings
         )
     ],

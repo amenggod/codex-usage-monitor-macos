@@ -65,6 +65,7 @@ struct CodexEventParser {
             }
             return RateLimitObservation(
                 limitID: value.id ?? "unknown",
+                planType: value.planType,
                 window: window,
                 usedPercent: limit.usedPercent,
                 resetsAt: Date(timeIntervalSince1970: limit.resetsAt),
@@ -161,12 +162,14 @@ private struct CodexTokenUsage: Decodable {
 private struct CodexRateLimits: Decodable {
     let id: String?
     let label: String?
+    let planType: String?
     let primary: CodexRateLimitWindow?
     let secondary: CodexRateLimitWindow?
 
     enum CodingKeys: String, CodingKey {
         case id = "limit_id"
         case label = "limit_name"
+        case planType = "plan_type"
         case primary
         case secondary
     }
@@ -175,6 +178,7 @@ private struct CodexRateLimits: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try? container.decode(String.self, forKey: .id)
         label = try? container.decode(String.self, forKey: .label)
+        planType = try? container.decode(String.self, forKey: .planType)
         primary = try? container.decode(CodexRateLimitWindow.self, forKey: .primary)
         secondary = try? container.decode(CodexRateLimitWindow.self, forKey: .secondary)
     }

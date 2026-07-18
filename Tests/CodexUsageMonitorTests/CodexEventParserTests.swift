@@ -73,10 +73,9 @@ struct CodexEventParserTests {
 
     @Test
     func parsesTokenAndBothKnownLimitWindows() throws {
-        let url = try #require(Bundle.module.url(
+        let url = try #require(TestResourceBundle.fixtureURL(
             forResource: "session-sample",
-            withExtension: "jsonl",
-            subdirectory: "Fixtures"
+            withExtension: "jsonl"
         ))
         let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n")
         let event = try #require(parser.parse(line: Data(lines[1].utf8)))
@@ -146,6 +145,18 @@ struct CodexEventParserTests {
         }
 
         #expect(token.limits.map(\.window) == [.other(minutes: 60, label: "Flexible")])
+    }
+
+    @Test
+    func preservesPlanTypeForLimitScopeSelection() throws {
+        let line = Data(#"{"timestamp":"2026-07-14T01:05:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","plan_type":"prolite","primary":{"used_percent":27,"window_minutes":10080,"resets_at":1784510029}}}}"#.utf8)
+        let event = try #require(parser.parse(line: line))
+        guard case let .token(token) = event else {
+            Issue.record("expected token")
+            return
+        }
+
+        #expect(token.limits.map(\.planType) == ["prolite"])
     }
 
     @Test

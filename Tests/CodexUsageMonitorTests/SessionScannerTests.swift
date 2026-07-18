@@ -87,6 +87,113 @@ struct SessionScannerTests {
         #expect(rewritten.processedLines == 2)
         #expect(try await fixture.totalUsage() == 271)
     }
+
+    @Test
+    func equalLengthSameInodeRewriteRestartsAtZero() async throws {
+        let fixture = try await ScannerFixture()
+        defer { fixture.remove() }
+        let original = fixture.encodedLines([
+            fixture.sessionLine(id: "old-session", project: "old-one"),
+            fixture.tokenLine(second: 1, last: fixture.usage(10)),
+        ])
+        let rewritten = fixture.encodedLines([
+            fixture.sessionLine(id: "new-session", project: "new-two"),
+            fixture.tokenLine(second: 1, last: fixture.usage(20)),
+        ])
+        #expect(original.count == rewritten.count)
+        try original.write(to: fixture.logURL)
+        let originalFileKey = try fixture.fileKey()
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        try fixture.overwriteInPlace(with: rewritten)
+        #expect(try fixture.fileKey() == originalFileKey)
+        let result = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(result.processedLines == 2)
+        #expect(try await fixture.projectTotals() == ["new-two": 20, "old-one": 10])
+    }
+
+    @Test
+    func longerSameInodeRewriteClearsTheStaleActiveSession() async throws {
+        let fixture = try await ScannerFixture()
+        defer { fixture.remove() }
+        let original = fixture.encodedLines([
+            fixture.sessionLine(id: "old-session", project: "old-one"),
+            fixture.tokenLine(second: 1, last: fixture.usage(10)),
+        ])
+        try original.write(to: fixture.logURL)
+        let originalFileKey = try fixture.fileKey()
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        let sameLengthInvalidPrefix = Data(
+            (String(repeating: "x", count: original.count - 1) + "\n").utf8
+        )
+        let orphanToken = Data(
+            (fixture.tokenLine(second: 2, last: fixture.usage(90)) + "\n").utf8
+        )
+        try fixture.overwriteInPlace(with: sameLengthInvalidPrefix + orphanToken)
+        #expect(try fixture.fileKey() == originalFileKey)
+        let result = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(result.finalOffset > UInt64(original.count))
+        #expect(try await fixture.totalUsage() == 10)
+        let cursor = try await fixture.repository.cursor(for: originalFileKey)
+        #expect(cursor?.activeSessionID == nil)
+    }
+
+    @Test
+    func oneFileCanSwitchFromParentToChildSession() async throws {
+        let fixture = try await ScannerFixture()
+        defer { fixture.remove() }
+        try fixture.write([
+            fixture.sessionLine(id: "parent", project: "parent-project"),
+            fixture.tokenLine(second: 1, last: fixture.usage(10)),
+            fixture.sessionLine(id: "child", project: "child-project"),
+            fixture.tokenLine(second: 2, last: fixture.usage(20)),
+        ])
+
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(try await fixture.projectTotals() == ["child-project": 20, "parent-project": 10])
+    }
+
+    @Test
+    func copiedParentHistoryAcrossBranchesIsCountedOnce() async throws {
+        let fixture = try await ScannerFixture()
+        defer { fixture.remove() }
+        let parentSession = fixture.sessionLine(id: "parent", project: "parent-project")
+        let parentToken = fixture.tokenLine(second: 1, last: fixture.usage(10))
+        try fixture.write([parentSession, parentToken])
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        let branchURL = fixture.directoryURL.appending(path: "branch.jsonl")
+        try fixture.write([
+            parentSession,
+            parentToken,
+            fixture.sessionLine(id: "child", project: "child-project"),
+            fixture.tokenLine(second: 2, last: fixture.usage(20)),
+        ], to: branchURL)
+        _ = try await fixture.scanner.scan(url: branchURL)
+
+        #expect(try await fixture.totalUsage() == 30)
+    }
+
+    @Test
+    func appendedTokenUsesSessionStoredInFileCursor() async throws {
+        let fixture = try await ScannerFixture()
+        defer { fixture.remove() }
+        try fixture.write([
+            fixture.sessionLine(id: "parent", project: "parent-project"),
+            fixture.sessionLine(id: "child", project: "child-project"),
+            fixture.tokenLine(second: 1, last: fixture.usage(10)),
+        ])
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        try fixture.append(fixture.tokenLine(second: 2, last: fixture.usage(20)))
+        _ = try await fixture.scanner.scan(url: fixture.logURL)
+
+        #expect(try await fixture.projectTotals() == ["child-project": 30])
+    }
 }
 
 private final class ScannerFixture: @unchecked Sendable {
@@ -105,8 +212,27 @@ private final class ScannerFixture: @unchecked Sendable {
         try await repository.migrate()
     }
 
-    func write(_ lines: [String]) throws {
-        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: logURL)
+    func write(_ lines: [String], to url: URL? = nil) throws {
+        try encodedLines(lines).write(to: url ?? logURL)
+    }
+
+    func encodedLines(_ lines: [String]) -> Data {
+        Data((lines.joined(separator: "\n") + "\n").utf8)
+    }
+
+    func overwriteInPlace(with data: Data) throws {
+        let handle = try FileHandle(forWritingTo: logURL)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: 0)
+        try handle.seek(toOffset: 0)
+        try handle.write(contentsOf: data)
+    }
+
+    func fileKey() throws -> String {
+        let values = try logURL.resourceValues(forKeys: [.fileResourceIdentifierKey])
+        return values.fileResourceIdentifier
+            .map { String(describing: $0) }
+            ?? logURL.standardizedFileURL.path
     }
 
     func append(_ line: String) throws {
@@ -126,14 +252,25 @@ private final class ScannerFixture: @unchecked Sendable {
             .reduce(0, +)
     }
 
+    func projectTotals() async throws -> [String: Int64] {
+        try await repository.queryUsage(from: nil, to: .distantFuture)
+            .reduce(into: [:]) { totals, row in
+                totals[row.projectName, default: 0] += row.usage.total
+            }
+    }
+
     func remove() {
         try? FileManager.default.removeItem(at: directoryURL)
     }
 
-    func sessionLine(id: String) -> String {
+    func sessionLine(id: String, project: String = "alpha") -> String {
         """
-        {"timestamp":"2026-07-14T01:00:00Z","type":"session_meta","payload":{"id":"\(id)","cwd":"/synthetic/projects/alpha"}}
+        {"timestamp":"2026-07-14T01:00:00Z","type":"session_meta","payload":{"id":"\(id)","cwd":"/synthetic/projects/\(project)"}}
         """
+    }
+
+    func usage(_ total: Int64) -> TokenUsage {
+        TokenUsage(input: total, cachedInput: 0, output: 0, reasoningOutput: 0, total: total)
     }
 
     func tokenLine(

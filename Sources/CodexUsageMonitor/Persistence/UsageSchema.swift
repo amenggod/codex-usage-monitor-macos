@@ -1,0 +1,202 @@
+import Foundation
+import SQLite3
+
+enum UsageSchema {
+    static let currentVersion: Int64 = 2
+    static let currentEventIdentityVersion: Int64 = 2
+    private static let eventIdentityVersionKey = "event_identity_version"
+
+    static func createVersionTwo(in database: SQLiteDatabase) throws {
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+              id TEXT PRIMARY KEY,
+              started_at REAL NOT NULL,
+              project_key TEXT NOT NULL,
+              project_name TEXT NOT NULL,
+              full_path TEXT
+            )
+            """
+        )
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_events (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              occurred_at REAL NOT NULL,
+              last_input_tokens INTEGER,
+              last_cached_input_tokens INTEGER,
+              last_output_tokens INTEGER,
+              last_reasoning_output_tokens INTEGER,
+              last_total_tokens INTEGER,
+              cumulative_input_tokens INTEGER,
+              cumulative_cached_input_tokens INTEGER,
+              cumulative_output_tokens INTEGER,
+              cumulative_reasoning_output_tokens INTEGER,
+              cumulative_total_tokens INTEGER,
+              delta_input_tokens INTEGER NOT NULL,
+              delta_cached_input_tokens INTEGER NOT NULL,
+              delta_output_tokens INTEGER NOT NULL,
+              delta_reasoning_output_tokens INTEGER NOT NULL,
+              delta_total_tokens INTEGER NOT NULL
+            )
+            """
+        )
+        try database.execute("CREATE INDEX IF NOT EXISTS usage_events_time ON usage_events(occurred_at)")
+        try database.execute("CREATE INDEX IF NOT EXISTS usage_events_session ON usage_events(session_id)")
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_cursors (
+              file_key TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              byte_offset INTEGER NOT NULL,
+              modified_at REAL NOT NULL,
+              active_session_id TEXT,
+              boundary_fingerprint TEXT
+            )
+            """
+        )
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cumulative_usage (
+              session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+              input_tokens INTEGER NOT NULL,
+              cached_input_tokens INTEGER NOT NULL,
+              output_tokens INTEGER NOT NULL,
+              reasoning_output_tokens INTEGER NOT NULL,
+              total_tokens INTEGER NOT NULL
+            )
+            """
+        )
+        try createRateLimits(in: database)
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_receipts (
+              receipt_key TEXT PRIMARY KEY,
+              sent_at REAL NOT NULL
+            )
+            """
+        )
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS index_metadata (
+              key TEXT PRIMARY KEY,
+              value INTEGER NOT NULL
+            )
+            """
+        )
+        try database.execute(
+            """
+            INSERT INTO index_metadata (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            [
+                .text(eventIdentityVersionKey),
+                .integer(currentEventIdentityVersion)
+            ]
+        )
+    }
+
+    static func eventIdentityVersion(in database: SQLiteDatabase) throws -> Int64? {
+        var hasMetadataTable = false
+        try database.query(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'index_metadata' LIMIT 1"
+        ) { _ in
+            hasMetadataTable = true
+        }
+        guard hasMetadataTable else { return nil }
+
+        var version: Int64?
+        try database.query(
+            "SELECT value FROM index_metadata WHERE key = ? LIMIT 1",
+            [.text(eventIdentityVersionKey)]
+        ) { statement in
+            version = sqlite3_column_int64(statement, 0)
+        }
+        return version
+    }
+
+    static func ensureVersionTwoCompatibility(in database: SQLiteDatabase) throws {
+        var cursorColumns: Set<String> = []
+        try database.query("PRAGMA table_info(file_cursors)") { statement in
+            guard let value = sqlite3_column_text(statement, 1) else { return }
+            cursorColumns.insert(String(cString: value))
+        }
+        let needsBoundaryFingerprint = !cursorColumns.contains("boundary_fingerprint")
+
+        var rateLimitPrimaryKey: [(position: Int, name: String)] = []
+        try database.query("PRAGMA table_info(rate_limits)") { statement in
+            let position = Int(sqlite3_column_int(statement, 5))
+            guard position > 0,
+                  let value = sqlite3_column_text(statement, 1) else { return }
+            rateLimitPrimaryKey.append((position, String(cString: value)))
+        }
+        let primaryKeyColumns = rateLimitPrimaryKey
+            .sorted { $0.position < $1.position }
+            .map(\.name)
+        let needsRateLimitMigration = !primaryKeyColumns.isEmpty && primaryKeyColumns != [
+            "window_key",
+            "limit_id",
+            "plan_type",
+        ]
+
+        guard needsBoundaryFingerprint || needsRateLimitMigration else { return }
+
+        try database.execute("BEGIN IMMEDIATE")
+        do {
+            if needsBoundaryFingerprint {
+                try database.execute(
+                    "ALTER TABLE file_cursors ADD COLUMN boundary_fingerprint TEXT"
+                )
+            }
+            if needsRateLimitMigration {
+                try database.execute("ALTER TABLE rate_limits RENAME TO rate_limits_legacy")
+                try createRateLimits(in: database)
+                try database.execute(
+                    """
+                    INSERT INTO rate_limits (
+                      window_key, limit_id, plan_type, window_minutes, window_label,
+                      used_percent, resets_at, observed_at
+                    )
+                    SELECT window_key, limit_id, '', window_minutes, window_label,
+                           used_percent, resets_at, observed_at
+                    FROM rate_limits_legacy
+                    WHERE 1
+                    ON CONFLICT(window_key, limit_id, plan_type) DO UPDATE SET
+                      window_minutes = excluded.window_minutes,
+                      window_label = excluded.window_label,
+                      used_percent = excluded.used_percent,
+                      resets_at = excluded.resets_at,
+                      observed_at = excluded.observed_at
+                    WHERE excluded.observed_at >= rate_limits.observed_at
+                    """
+                )
+                try database.execute("DROP TABLE rate_limits_legacy")
+                try database.execute("DELETE FROM file_cursors")
+            }
+            try database.execute("COMMIT")
+        } catch {
+            _ = try? database.execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    private static func createRateLimits(in database: SQLiteDatabase) throws {
+        try database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rate_limits (
+              window_key TEXT NOT NULL,
+              limit_id TEXT NOT NULL,
+              plan_type TEXT NOT NULL,
+              window_minutes INTEGER NOT NULL,
+              window_label TEXT,
+              used_percent REAL NOT NULL,
+              resets_at REAL NOT NULL,
+              observed_at REAL NOT NULL,
+              PRIMARY KEY (window_key, limit_id, plan_type)
+            )
+            """
+        )
+    }
+}

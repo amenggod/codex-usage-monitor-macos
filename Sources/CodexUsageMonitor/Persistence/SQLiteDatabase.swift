@@ -46,7 +46,8 @@ final class SQLiteDatabase: @unchecked Sendable {
         sqlite3_close(handle)
     }
 
-    func execute(_ sql: String, _ values: [SQLiteValue] = []) throws {
+    @discardableResult
+    func execute(_ sql: String, _ values: [SQLiteValue] = []) throws -> Int {
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
         try bind(values, to: statement)
@@ -56,7 +57,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             case SQLITE_ROW:
                 continue
             case SQLITE_DONE:
-                return
+                return Int(sqlite3_changes(handle))
             default:
                 throw currentError()
             }

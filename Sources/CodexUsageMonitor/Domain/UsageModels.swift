@@ -58,10 +58,27 @@ enum LimitWindow: Equatable, Hashable, Sendable {
 
 struct RateLimitObservation: Equatable, Sendable {
     let limitID: String
+    let planType: String?
     let window: LimitWindow
     let usedPercent: Double
     let resetsAt: Date
     let observedAt: Date
+
+    init(
+        limitID: String,
+        planType: String? = nil,
+        window: LimitWindow,
+        usedPercent: Double,
+        resetsAt: Date,
+        observedAt: Date
+    ) {
+        self.limitID = limitID
+        self.planType = planType
+        self.window = window
+        self.usedPercent = usedPercent
+        self.resetsAt = resetsAt
+        self.observedAt = observedAt
+    }
 }
 
 struct ParsedTokenEvent: Equatable, Sendable {
@@ -72,9 +89,23 @@ struct ParsedTokenEvent: Equatable, Sendable {
 }
 
 struct LimitStatus: Equatable, Sendable {
+    let limitID: String
     let window: LimitWindow
     let usedPercent: Double
     let resetsAt: Date
+
+    init(
+        limitID: String = "codex",
+        window: LimitWindow,
+        usedPercent: Double,
+        resetsAt: Date
+    ) {
+        self.limitID = limitID
+        self.window = window
+        self.usedPercent = usedPercent
+        self.resetsAt = resetsAt
+    }
+
     var remainingPercent: Double { min(100, max(0, 100 - usedPercent)) }
 }
 
@@ -94,8 +125,21 @@ enum DataFreshness: Equatable, Sendable {
     case loading
     case fresh(Date)
     case stale(Date)
+    case partial(Date, failedFiles: Int)
+    case rebuilding(completed: Int, total: Int)
     case noData
     case failed(String)
+}
+
+enum LimitDataFreshness: Equatable, Sendable {
+    case fresh(Date)
+    case stale(Date)
+    case unavailable(lastSuccessfulAt: Date?, message: String)
+
+    var isFresh: Bool {
+        if case .fresh = self { return true }
+        return false
+    }
 }
 
 struct ProjectUsage: Identifiable, Equatable, Sendable {
@@ -111,12 +155,36 @@ struct DashboardSnapshot: Equatable, Sendable {
     let projects: [ProjectUsage]
     let limits: [LimitStatus]
     let freshness: DataFreshness
+    let limitFreshness: LimitDataFreshness
+
+    init(
+        range: TokenRange,
+        total: TokenUsage,
+        projects: [ProjectUsage],
+        limits: [LimitStatus],
+        freshness: DataFreshness,
+        limitFreshness: LimitDataFreshness = .unavailable(
+            lastSuccessfulAt: nil,
+            message: "等待实时限额"
+        )
+    ) {
+        self.range = range
+        self.total = total
+        self.projects = projects
+        self.limits = limits
+        self.freshness = freshness
+        self.limitFreshness = limitFreshness
+    }
 
     static let loading = DashboardSnapshot(
         range: .today,
         total: .zero,
         projects: [],
         limits: [],
-        freshness: .loading
+        freshness: .loading,
+        limitFreshness: .unavailable(
+            lastSuccessfulAt: nil,
+            message: "等待实时限额"
+        )
     )
 }

@@ -4,20 +4,18 @@ import Testing
 
 @Suite("MenuBarFormattingTests")
 struct MenuBarFormattingTests {
-    @Test func balancedLabelShowsBothKnownWindows() {
-        let limits = [
-            LimitStatus(window: .fiveHours, usedPercent: 28, resetsAt: .distantFuture),
-            LimitStatus(window: .week, usedPercent: 52, resetsAt: .distantFuture),
+    @Test func freshnessSymbolsRemainAvailableForEveryState() {
+        let states: [DataFreshness] = [
+            .loading,
+            .fresh(.distantPast),
+            .stale(.distantPast),
+            .partial(.distantPast, failedFiles: 1),
+            .rebuilding(completed: 1, total: 2),
+            .noData,
+            .failed("错误"),
         ]
 
-        #expect(MenuBarFormatter.title(limits: limits) == "5h 72% · 周 48%")
-    }
-
-    @Test func missingLimitsShowsWaitingCopy() {
-        #expect(MenuBarFormatter.title(limits: []) == "Codex --")
-        #expect(MenuBarFormatter.title(limits: [
-            LimitStatus(window: .fiveHours, usedPercent: 28, resetsAt: .distantFuture),
-        ]) == "Codex --")
+        #expect(states.allSatisfy { !FreshnessFormatter.symbol(for: $0).isEmpty })
     }
 
     @Test func projectAccessibilityTextNeverContainsFullPath() {

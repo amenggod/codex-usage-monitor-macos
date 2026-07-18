@@ -51,7 +51,6 @@ struct UsageAggregatorTests {
             repository: repository,
             id: "today",
             sessionID: "range-session",
-            fileKey: "range-file",
             project: project,
             occurredAt: dayStart.addingTimeInterval(60 * 60),
             usage: usage(total: 1)
@@ -73,10 +72,61 @@ struct UsageAggregatorTests {
         let today = try await aggregator.snapshot(range: .today, now: now, calendar: calendar)
         let sevenDays = try await aggregator.snapshot(range: .sevenDays, now: now, calendar: calendar)
         let all = try await aggregator.snapshot(range: .all, now: now, calendar: calendar)
+        let widget = try await aggregator.widgetSnapshots(now: now, calendar: calendar)
 
         #expect(today.total.total == 1)
         #expect(sevenDays.total.total == 3)
         #expect(all.total.total == 6)
+        #expect(widget.today == today)
+        #expect(widget.all == all)
+    }
+
+    @Test
+    func repositoryReadsWidgetInputsFromOneActorBoundary() async throws {
+        let databaseURL = temporaryAggregationDatabaseURL()
+        defer { removeAggregationDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "Asia/Shanghai"))
+        let now = Date(timeIntervalSince1970: 1_783_975_200)
+        let dayStart = calendar.startOfDay(for: now)
+        let project = ProjectIdentity(
+            key: "/synthetic/widget",
+            displayName: "widget",
+            fullPath: "/synthetic/widget"
+        )
+        try await insertAggregationEvent(
+            repository: repository,
+            id: "today-widget",
+            sessionID: "widget-session",
+            project: project,
+            occurredAt: dayStart.addingTimeInterval(60),
+            usage: usage(total: 1)
+        )
+        try await repository.insertUsageEvent(
+            id: "old-widget",
+            sessionID: "widget-session",
+            occurredAt: dayStart.addingTimeInterval(-60),
+            usage: usage(total: 2)
+        )
+        let limit = RateLimitObservation(
+            limitID: "codex",
+            window: .week,
+            usedPercent: 28,
+            resetsAt: now.addingTimeInterval(86_400),
+            observedAt: now
+        )
+        try await repository.replaceLatestLimits([limit])
+
+        let inputs = try await repository.widgetUsageInputs(
+            todayFrom: dayStart,
+            to: now
+        )
+
+        #expect(inputs.todayRows.map(\.usage.total) == [1])
+        #expect(inputs.allRows.map(\.usage.total) == [3])
+        #expect(inputs.limits == [limit])
     }
 
     @Test
@@ -90,7 +140,6 @@ struct UsageAggregatorTests {
             repository: repository,
             id: "alpha-event",
             sessionID: "alpha-session",
-            fileKey: "alpha-file",
             project: ProjectIdentity(key: "/synthetic/alpha", displayName: "alpha", fullPath: "/synthetic/alpha"),
             occurredAt: now.addingTimeInterval(-10),
             usage: TokenUsage(input: 10, cachedInput: 2, output: 3, reasoningOutput: 1, total: 20)
@@ -99,7 +148,6 @@ struct UsageAggregatorTests {
             repository: repository,
             id: "shared-first-event",
             sessionID: "shared-first-session",
-            fileKey: "shared-first-file",
             project: ProjectIdentity(
                 key: "/synthetic/first/shared",
                 displayName: "shared",
@@ -112,7 +160,6 @@ struct UsageAggregatorTests {
             repository: repository,
             id: "shared-second-event",
             sessionID: "shared-second-session",
-            fileKey: "shared-second-file",
             project: ProjectIdentity(
                 key: "/synthetic/second/shared",
                 displayName: "shared",
@@ -130,7 +177,19 @@ struct UsageAggregatorTests {
         )
         try await repository.replaceLatestLimits([limit])
 
-        let snapshot = try await UsageAggregator(repository: repository).snapshot(
+        let liveStore = LiveRateLimitStore()
+        await liveStore.replace(
+            limits: [LimitStatus(
+                window: .fiveHours,
+                usedPercent: 42,
+                resetsAt: limit.resetsAt
+            )],
+            observedAt: now
+        )
+        let snapshot = try await UsageAggregator(
+            repository: repository,
+            limitProvider: liveStore
+        ).snapshot(
             range: .all,
             now: now,
             calendar: .current
@@ -160,6 +219,95 @@ struct UsageAggregatorTests {
         #expect(snapshot.projects.isEmpty)
         #expect(snapshot.freshness == .noData)
     }
+
+    @Test
+    func snapshotOmitsExpiredLimitsAndKeepsAnActiveSingleWindow() async throws {
+        let databaseURL = temporaryAggregationDatabaseURL()
+        defer { removeAggregationDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        let now = Date(timeIntervalSince1970: 2_000)
+        let expiredFiveHours = RateLimitObservation(
+            limitID: "codex",
+            window: .fiveHours,
+            usedPercent: 80,
+            resetsAt: now,
+            observedAt: now.addingTimeInterval(-100)
+        )
+        let activeWeek = RateLimitObservation(
+            limitID: "codex",
+            window: .week,
+            usedPercent: 52,
+            resetsAt: now.addingTimeInterval(1_000),
+            observedAt: now
+        )
+        try await repository.replaceLatestLimits([expiredFiveHours, activeWeek])
+
+        let liveStore = LiveRateLimitStore()
+        await liveStore.replace(
+            limits: [
+                LimitStatus(
+                    window: .fiveHours,
+                    usedPercent: 80,
+                    resetsAt: expiredFiveHours.resetsAt
+                ),
+                LimitStatus(
+                    window: .week,
+                    usedPercent: 52,
+                    resetsAt: activeWeek.resetsAt
+                ),
+            ],
+            observedAt: now
+        )
+        let snapshot = try await UsageAggregator(
+            repository: repository,
+            limitProvider: liveStore
+        ).snapshot(
+            range: .all,
+            now: now,
+            calendar: .current
+        )
+
+        #expect(snapshot.limits == [
+            LimitStatus(window: .week, usedPercent: 52, resetsAt: activeWeek.resetsAt),
+        ])
+    }
+
+    @Test
+    func liveAccountLimitOverridesOlderLogObservation() async throws {
+        let databaseURL = temporaryAggregationDatabaseURL()
+        defer { removeAggregationDatabase(at: databaseURL) }
+        let repository = try UsageRepository(url: databaseURL)
+        try await repository.migrate()
+        let now = Date(timeIntervalSince1970: 2_000)
+        try await repository.replaceLatestLimits([
+            RateLimitObservation(
+                limitID: "codex",
+                planType: "prolite",
+                window: .week,
+                usedPercent: 27,
+                resetsAt: now.addingTimeInterval(86_400),
+                observedAt: now.addingTimeInterval(-3_600)
+            )
+        ])
+        let liveStore = LiveRateLimitStore()
+        await liveStore.replace(
+            limits: [LimitStatus(
+                window: .week,
+                usedPercent: 31,
+                resetsAt: now.addingTimeInterval(86_400)
+            )],
+            observedAt: now
+        )
+
+        let snapshot = try await UsageAggregator(
+            repository: repository,
+            limitProvider: liveStore
+        ).snapshot(range: .all, now: now, calendar: .current)
+
+        #expect(snapshot.limits.map(\.remainingPercent) == [69])
+        #expect(snapshot.limitFreshness == .fresh(now))
+    }
 }
 
 private func temporaryAggregationDatabaseURL() -> URL {
@@ -182,14 +330,12 @@ private func insertAggregationEvent(
     repository: UsageRepository,
     id: String,
     sessionID: String,
-    fileKey: String,
     project: ProjectIdentity,
     occurredAt: Date,
     usage: TokenUsage
 ) async throws {
     try await repository.upsertSession(
         SessionMetadata(sessionID: sessionID, startedAt: occurredAt, workingDirectory: project.fullPath),
-        fileKey: fileKey,
         project: project
     )
     try await repository.insertUsageEvent(

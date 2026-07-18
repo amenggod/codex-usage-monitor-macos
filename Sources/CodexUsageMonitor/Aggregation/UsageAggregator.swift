@@ -1,16 +1,34 @@
 import Foundation
 
+struct WidgetDashboardSnapshots: Sendable {
+    let today: DashboardSnapshot
+    let all: DashboardSnapshot
+}
+
 protocol UsageAggregating: Sendable {
     func snapshot(range: TokenRange, now: Date, calendar: Calendar) async throws -> DashboardSnapshot
 }
 
-struct UsageAggregator: UsageAggregating, Sendable {
+protocol WidgetSnapshotAggregating: Sendable {
+    func widgetSnapshots(now: Date, calendar: Calendar) async throws -> WidgetDashboardSnapshots
+}
+
+struct UsageAggregator: UsageAggregating, WidgetSnapshotAggregating, Sendable {
     struct Bounds: Equatable, Sendable {
         let start: Date?
         let end: Date
     }
 
     let repository: UsageRepository
+    let limitProvider: any LiveRateLimitProviding
+
+    init(
+        repository: UsageRepository,
+        limitProvider: any LiveRateLimitProviding = UnavailableLiveRateLimitProvider()
+    ) {
+        self.repository = repository
+        self.limitProvider = limitProvider
+    }
 
     static func bounds(for range: TokenRange, now: Date, calendar: Calendar) -> Bounds {
         switch range {
@@ -30,6 +48,52 @@ struct UsageAggregator: UsageAggregating, Sendable {
     ) async throws -> DashboardSnapshot {
         let bounds = Self.bounds(for: range, now: now, calendar: calendar)
         let rows = try await repository.queryUsage(from: bounds.start, to: bounds.end)
+        let liveState = await limitProvider.state(now: now)
+        return Self.makeSnapshot(
+            range: range,
+            rows: rows,
+            limits: Self.activeLimits(from: liveState, now: now),
+            limitFreshness: liveState.dashboardFreshness,
+            now: now
+        )
+    }
+
+    func widgetSnapshots(
+        now: Date,
+        calendar: Calendar
+    ) async throws -> WidgetDashboardSnapshots {
+        let inputs = try await repository.widgetUsageInputs(
+            todayFrom: calendar.startOfDay(for: now),
+            to: now
+        )
+        let liveState = await limitProvider.state(now: now)
+        let limits = Self.activeLimits(from: liveState, now: now)
+        let limitFreshness = liveState.dashboardFreshness
+        return WidgetDashboardSnapshots(
+            today: Self.makeSnapshot(
+                range: .today,
+                rows: inputs.todayRows,
+                limits: limits,
+                limitFreshness: limitFreshness,
+                now: now
+            ),
+            all: Self.makeSnapshot(
+                range: .all,
+                rows: inputs.allRows,
+                limits: limits,
+                limitFreshness: limitFreshness,
+                now: now
+            )
+        )
+    }
+
+    private static func makeSnapshot(
+        range: TokenRange,
+        rows: [StoredUsageRow],
+        limits: [LimitStatus],
+        limitFreshness: LimitDataFreshness,
+        now: Date
+    ) -> DashboardSnapshot {
         let duplicateNames = Dictionary(grouping: rows, by: \.projectName)
             .filter { $0.value.count > 1 }
             .keys
@@ -69,16 +133,40 @@ struct UsageAggregator: UsageAggregating, Sendable {
                 total: partial.total + project.usage.total
             )
         }
-        let limits = try await repository.latestLimits().map {
-            LimitStatus(window: $0.window, usedPercent: $0.usedPercent, resetsAt: $0.resetsAt)
-        }
 
         return DashboardSnapshot(
             range: range,
             total: total,
             projects: projects,
             limits: limits,
-            freshness: rows.isEmpty ? .noData : .fresh(now)
+            freshness: rows.isEmpty ? .noData : .fresh(now),
+            limitFreshness: limitFreshness
         )
+    }
+
+    private static func activeLimits(
+        from state: LiveRateLimitState,
+        now: Date
+    ) -> [LimitStatus] {
+        state.limits
+            .filter { $0.limitID == "codex" && $0.resetsAt > now }
+            .sorted { $0.window.minutes < $1.window.minutes }
+    }
+}
+
+private struct UnavailableLiveRateLimitProvider: LiveRateLimitProviding {
+    func state(now: Date) async -> LiveRateLimitState {
+        .unavailable(lastSuccessfulAt: nil, message: "等待实时限额")
+    }
+}
+
+private extension LiveRateLimitState {
+    var dashboardFreshness: LimitDataFreshness {
+        switch self {
+        case let .fresh(_, observedAt): .fresh(observedAt)
+        case let .stale(_, observedAt): .stale(observedAt)
+        case let .unavailable(lastSuccessfulAt, message):
+            .unavailable(lastSuccessfulAt: lastSuccessfulAt, message: message)
+        }
     }
 }

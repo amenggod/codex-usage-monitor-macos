@@ -7,6 +7,7 @@ struct ScanResult: Equatable, Sendable {
 }
 
 actor SessionScanner {
+    private static let fingerprintWindowSize = 4_096
     private let repository: UsageRepository
     private let parser = CodexEventParser()
     private let normalizer = ProjectPathNormalizer()
@@ -29,10 +30,21 @@ actor SessionScanner {
         let modifiedAt = values.contentModificationDate ?? .distantPast
         let savedCursor = try await repository.cursor(for: fileKey)
         let savedOffset = savedCursor?.offset ?? 0
-        let startOffset = savedOffset > fileSize ? 0 : savedOffset
 
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
+        let boundaryMatches: Bool
+        if let savedCursor, savedOffset > 0, savedOffset <= fileSize,
+           let savedFingerprint = savedCursor.boundaryFingerprint {
+            boundaryMatches = try Self.boundaryFingerprint(
+                in: handle,
+                endingAt: savedOffset
+            ) == savedFingerprint
+        } else {
+            boundaryMatches = savedOffset == 0
+        }
+        let requiresReset = savedOffset > fileSize || !boundaryMatches
+        let startOffset = requiresReset ? 0 : savedOffset
         try handle.seek(toOffset: startOffset)
         guard let available = try handle.readToEnd(),
               let finalNewline = available.lastIndex(of: 0x0A) else {
@@ -40,57 +52,66 @@ actor SessionScanner {
         }
 
         let complete = available[available.startIndex...finalNewline]
-        var lineStartOffset = startOffset
-        var sessionID = try await repository.sessionID(forFileKey: fileKey)
+        var activeSessionID = requiresReset ? nil : savedCursor?.activeSessionID
+        var sessions: [SessionUpsert] = []
+        var events: [LogicalTokenEvent] = []
+        var limits: [RateLimitObservation] = []
         var processedLines = 0
 
         for rawLine in complete.split(separator: 0x0A, omittingEmptySubsequences: false) {
             let line = Data(rawLine)
-            defer { lineStartOffset += UInt64(rawLine.count + 1) }
             guard !line.isEmpty, let event = parser.parse(line: line) else { continue }
             processedLines += 1
 
             switch event {
             case let .session(metadata):
-                sessionID = metadata.sessionID
-                let project = normalizer.identity(for: metadata.workingDirectory)
-                try await repository.upsertSession(
-                    metadata,
-                    fileKey: fileKey,
-                    project: project
-                )
+                activeSessionID = metadata.sessionID
+                sessions.append(SessionUpsert(
+                    metadata: metadata,
+                    project: normalizer.identity(for: metadata.workingDirectory)
+                ))
 
             case let .token(token):
-                guard let sessionID else { continue }
-                let previous = try await repository.previousCumulativeUsage(sessionID: sessionID)
-                let usage = TokenDeltaCalculator.delta(
-                    lastUsage: token.lastUsage,
-                    cumulativeUsage: token.cumulativeUsage,
-                    previousCumulative: previous
-                )
-                let digest = SHA256.hash(data: line)
-                    .map { String(format: "%02x", $0) }
-                    .joined()
-                try await repository.insertUsageEvent(
-                    id: "\(fileKey):\(lineStartOffset):\(digest)",
-                    sessionID: sessionID,
+                guard let activeSessionID else { continue }
+                events.append(LogicalTokenEvent(
+                    id: TokenEventIdentity.make(sessionID: activeSessionID, event: token),
+                    sessionID: activeSessionID,
                     occurredAt: token.occurredAt,
-                    usage: usage
-                )
-                if let cumulative = token.cumulativeUsage {
-                    try await repository.saveCumulativeUsage(cumulative, sessionID: sessionID)
-                }
-                try await repository.replaceLatestLimits(token.limits)
+                    lastUsage: token.lastUsage,
+                    cumulativeUsage: token.cumulativeUsage
+                ))
+                limits.append(contentsOf: token.limits)
             }
         }
 
         let finalOffset = startOffset + UInt64(complete.count)
-        try await repository.saveCursor(FileCursor(
-            fileKey: fileKey,
-            path: fileURL.path,
-            offset: finalOffset,
-            modifiedAt: modifiedAt
+        let boundaryFingerprint = try Self.boundaryFingerprint(
+            in: handle,
+            endingAt: finalOffset
+        )
+        _ = try await repository.apply(FileIngestionBatch(
+            sessions: sessions,
+            events: events,
+            limits: limits,
+            cursor: FileCursor(
+                fileKey: fileKey,
+                path: fileURL.path,
+                offset: finalOffset,
+                modifiedAt: modifiedAt,
+                activeSessionID: activeSessionID,
+                boundaryFingerprint: boundaryFingerprint
+            )
         ))
         return ScanResult(processedLines: processedLines, finalOffset: finalOffset)
+    }
+
+    private static func boundaryFingerprint(
+        in handle: FileHandle,
+        endingAt offset: UInt64
+    ) throws -> String {
+        let length = min(UInt64(fingerprintWindowSize), offset)
+        try handle.seek(toOffset: offset - length)
+        let data = try handle.read(upToCount: Int(length)) ?? Data()
+        return Data(SHA256.hash(data: data)).base64EncodedString()
     }
 }

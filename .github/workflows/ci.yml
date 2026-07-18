@@ -7,18 +7,93 @@ on:
 permissions:
   contents: read
 
+env:
+  XCODEGEN_VERSION: "2.45.4"
+  XCODEGEN_URL: "https://github.com/yonaskolb/XcodeGen/releases/download/2.45.4/xcodegen.zip"
+  XCODEGEN_SHA256: "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"
+
 jobs:
-  test:
+  swift-package-tests:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Select Xcode 26.3
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          test "$(xcodebuild -version | head -1)" = "Xcode 26.3"
       - name: Verify Swift toolchain
         run: swift --version
-      - name: Test
+      - name: Test Swift package
         run: swift test
-      - name: Build app bundle
-        run: bash Scripts/build-app.sh
+
+  xcode-gates:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          test "$(xcodebuild -version | head -1)" = "Xcode 26.3"
+      - name: Install pinned XcodeGen
+        run: |
+          archive="$RUNNER_TEMP/xcodegen.zip"
+          extract_dir="$RUNNER_TEMP/xcodegen-$XCODEGEN_VERSION"
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-all-errors \
+            "$XCODEGEN_URL" \
+            --output "$archive"
+          install_bin="$(
+            bash Scripts/install-xcodegen.sh \
+              "$archive" \
+              "$XCODEGEN_SHA256" \
+              "$extract_dir" \
+              "$XCODEGEN_VERSION"
+          )"
+          echo "$install_bin" >> "$GITHUB_PATH"
+      - name: Verify CI contracts
+        run: bash Scripts/test-ci-contracts.sh
+      - name: Verify generated project is current
+        run: |
+          bash Scripts/generate-project.sh
+          git diff --exit-code -- CodexUsageMonitor.xcodeproj Config
+          test -z "$(git status --porcelain --untracked-files=all -- CodexUsageMonitor.xcodeproj Config)"
+      - name: Test Xcode project
+        run: |
+          xcodebuild \
+            -project CodexUsageMonitor.xcodeproj \
+            -scheme CodexUsageMonitorTests \
+            -configuration Debug \
+            -derivedDataPath .build/ci-xcode-tests \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+      - name: Compile and package without signing
+        run: CODE_SIGNING_ALLOWED=NO bash Scripts/build-app.sh
+      - name: Verify packaged bundle
+        run: |
+          bash Scripts/verify-bundle.sh "dist/Codex Usage Monitor.app"
+          bash Scripts/test-verify-bundle-signing.sh "dist/Codex Usage Monitor.app"
+      - name: Verify distribution archive
+        run: |
+          unzip -t dist/Codex-Usage-Monitor-macOS.zip
+          archive_dir="$RUNNER_TEMP/packaged-app"
+          rm -rf "$archive_dir"
+          mkdir -p "$archive_dir"
+          ditto -x -k dist/Codex-Usage-Monitor-macOS.zip "$archive_dir"
+          app_count="$(
+            find "$archive_dir" -maxdepth 1 -type d -name '*.app' -print |
+              wc -l |
+              tr -d '[:space:]'
+          )"
+          test "$app_count" = "1"
+          archived_app="$(
+            find "$archive_dir" -maxdepth 1 -type d -name '*.app' -print -quit
+          )"
+          bash Scripts/verify-bundle.sh "$archived_app"

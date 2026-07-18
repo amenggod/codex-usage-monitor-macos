@@ -4,6 +4,147 @@ import Testing
 
 @Suite("AppPresentationStateTests")
 struct AppPresentationStateTests {
+    @Test func missingFiveHourWindowLeavesOnlyWeekVisible() {
+        let week = LimitStatus(window: .week, usedPercent: 50, resetsAt: .distantFuture)
+
+        #expect(UsagePresentationPolicy.visibleWindows(limits: [week]) == [.week])
+    }
+
+    @Test func expiredFiveHourWindowLeavesOnlyWeekVisible() {
+        let expiredFiveHours = LimitStatus(
+            window: .fiveHours,
+            usedPercent: 25,
+            resetsAt: .distantPast
+        )
+
+        #expect(
+            UsagePresentationPolicy.visibleWindows(limits: [expiredFiveHours])
+                == [.week]
+        )
+    }
+
+    @Test func limitsExpireExactlyAtTheirResetBoundary() {
+        let reset = Date(timeIntervalSince1970: 1_000)
+        let limits = [
+            LimitStatus(window: .fiveHours, usedPercent: 25, resetsAt: reset),
+            LimitStatus(window: .week, usedPercent: 50, resetsAt: reset),
+        ]
+
+        #expect(
+            UsagePresentationPolicy.activeLimits(
+                limits: limits,
+                now: reset.addingTimeInterval(-0.001)
+            ) == limits
+        )
+        #expect(UsagePresentationPolicy.activeLimits(limits: limits, now: reset).isEmpty)
+        #expect(
+            UsagePresentationPolicy.visibleWindows(limits: limits, now: reset)
+                == [.week]
+        )
+    }
+
+    @Test func bothKnownWindowsRemainVisibleInDisplayOrder() {
+        let week = LimitStatus(window: .week, usedPercent: 50, resetsAt: .distantFuture)
+        let fiveHours = LimitStatus(
+            window: .fiveHours,
+            usedPercent: 25,
+            resetsAt: .distantFuture
+        )
+
+        #expect(
+            UsagePresentationPolicy.visibleWindows(limits: [week, fiveHours])
+                == [.fiveHours, .week]
+        )
+    }
+
+    @Test func missingWeekWindowKeepsItsWaitingSlot() {
+        let fiveHours = LimitStatus(
+            window: .fiveHours,
+            usedPercent: 25,
+            resetsAt: .distantFuture
+        )
+
+        #expect(
+            UsagePresentationPolicy.visibleWindows(limits: [fiveHours])
+                == [.fiveHours, .week]
+        )
+    }
+
+    @Test func partialFailureHasReadableStatusText() {
+        let text = FreshnessFormatter.text(
+            for: .partial(.distantPast, failedFiles: 2)
+        )
+
+        #expect(text == "部分数据等待恢复 · 2 个文件")
+    }
+
+    @Test func rebuildingAndFailureHaveReadableStatusText() {
+        #expect(FreshnessFormatter.text(for: .rebuilding(completed: 3, total: 8)) == "正在重建 · 3/8")
+        #expect(FreshnessFormatter.text(for: .failed("数据库不可用")) == "读取失败：数据库不可用")
+    }
+
+    @Test func liveLimitFreshnessHasExplicitStatusText() {
+        let time = Date(timeIntervalSince1970: 10_000)
+        let formatted = time.formatted(date: .omitted, time: .shortened)
+
+        #expect(LimitFreshnessFormatter.text(for: .fresh(time)) == "实时限额更新于 \(formatted)")
+        #expect(LimitFreshnessFormatter.text(for: .stale(time)) == "上次实时同步 \(formatted)")
+        #expect(LimitFreshnessFormatter.text(for: .unavailable(
+            lastSuccessfulAt: time,
+            message: "连接失败"
+        )) == "实时限额不可用：连接失败")
+    }
+
+    @MainActor
+    @Test func settingsMenuBarVisibilityBindingUpdatesInjectedStoreAndPersists() throws {
+        let suiteName = "MenuBarVisibilityTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = MenuBarVisibilityStore(defaults: defaults)
+        let settings = SettingsView(
+            model: LiveDependencies.makeFailureViewModel(
+                error: PresentationTestFailure(message: "unused")
+            ),
+            launchAtLogin: LaunchAtLoginServiceSpy(enabled: false),
+            notificationSender: PresentationNotificationSenderSpy(enabled: false),
+            menuBarVisibilityStore: store
+        )
+
+        let binding = settings.menuBarVisibilityBinding
+        #expect(!binding.wrappedValue)
+        binding.wrappedValue = true
+
+        #expect(store.isVisible)
+        #expect(MenuBarVisibilityStore(defaults: defaults).isVisible)
+    }
+
+    @MainActor
+    @Test func displayEntryPointsShareOneLaunchAtLoginService() {
+        let model = LiveDependencies.makeFailureViewModel(
+            error: PresentationTestFailure(message: "unused")
+        )
+        let launchAtLogin = LaunchAtLoginServiceSpy(enabled: false)
+        let dashboard = DashboardWindowController(
+            model: model,
+            launchAtLogin: launchAtLogin
+        )
+        let popover = UsagePopoverView(
+            model: model,
+            launchAtLogin: launchAtLogin,
+            dashboard: dashboard
+        )
+        let settings = SettingsView(
+            model: model,
+            launchAtLogin: launchAtLogin,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false),
+            menuBarVisibilityStore: MenuBarVisibilityStore()
+        )
+
+        #expect(dashboard.launchAtLogin === launchAtLogin)
+        #expect(popover.launchAtLogin === launchAtLogin)
+        #expect(settings.launchAtLogin === launchAtLogin)
+    }
+
     @MainActor
     @Test func appRuntimeLaunchStartsMonitoringOnceWithoutPopover() async {
         let starter = RuntimeStarterSpy()
@@ -27,7 +168,57 @@ struct AppPresentationStateTests {
 
         #expect(!state.isLaunchAtLoginEnabled)
         #expect(state.launchAtLoginError == "无法启用")
+        #expect(!state.canRetryLaunchAtLoginMigration)
         #expect(!service.isEnabled)
+    }
+
+    @MainActor
+    @Test func widgetSharingFailureAppearsWithoutChangingNotificationOrLoginState() {
+        let state = SettingsViewState(
+            launchAtLogin: LaunchAtLoginServiceSpy(enabled: true),
+            notificationSender: PresentationNotificationSenderSpy(enabled: false),
+            widgetSharingStatus: .unavailable("小组件共享不可用")
+        )
+
+        #expect(state.widgetSharingMessage == "小组件共享不可用")
+        #expect(state.isLaunchAtLoginEnabled)
+        #expect(!state.notificationsEnabled)
+    }
+
+    @MainActor
+    @Test func widgetSharingRecoveryClearsOnlyItsOwnErrorState() async {
+        let launchAtLogin = LaunchAtLoginServiceSpy(
+            enabled: false,
+            enableFailure: "无法启用登录启动"
+        )
+        let notificationSender = PresentationNotificationSenderSpy(
+            enabled: false,
+            authorizationResults: [false]
+        )
+        let state = SettingsViewState(
+            launchAtLogin: launchAtLogin,
+            notificationSender: notificationSender
+        )
+        state.setLaunchAtLoginEnabled(true)
+        await state.setNotificationsEnabled(true)
+
+        #expect(state.launchAtLoginError == "无法启用登录启动")
+        #expect(state.notificationMessage == "未授予通知权限")
+
+        state.setWidgetSharingStatus(.unavailable("小组件共享不可用"))
+        #expect(state.widgetSharingMessage == "小组件共享不可用")
+        #expect(state.launchAtLoginError == "无法启用登录启动")
+        #expect(state.notificationMessage == "未授予通知权限")
+
+        state.setWidgetSharingStatus(.ready(Date(timeIntervalSince1970: 1_000)))
+        #expect(state.widgetSharingMessage == nil)
+        #expect(state.launchAtLoginError == "无法启用登录启动")
+        #expect(state.notificationMessage == "未授予通知权限")
+
+        state.setWidgetSharingStatus(nil)
+        #expect(state.widgetSharingMessage == nil)
+        #expect(state.launchAtLoginError == "无法启用登录启动")
+        #expect(state.notificationMessage == "未授予通知权限")
     }
 
     @MainActor
@@ -45,6 +236,115 @@ struct AppPresentationStateTests {
         #expect(state.isLaunchAtLoginEnabled)
         #expect(state.launchAtLoginError == nil)
         #expect(service.isEnabled)
+    }
+
+    @MainActor
+    @Test func settingsUsesSinglePreferenceTransactionAndReturnedState() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            preferenceResults: [false]
+        )
+        let state = SettingsViewState(
+            launchAtLogin: service,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false)
+        )
+
+        state.setLaunchAtLoginEnabled(true)
+
+        #expect(service.preferenceRequests == [true])
+        #expect(service.directSetRequests.isEmpty)
+        #expect(!state.isLaunchAtLoginEnabled)
+    }
+
+    @MainActor
+    @Test func settingsPreferenceRetriesStartupMigrationAndClearsItsError() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            migrationFailures: ["无法迁移旧登录项"]
+        )
+        #expect(throws: PresentationTestFailure.self) {
+            try service.migrateLegacyRegistrationIfNeeded()
+        }
+        let state = SettingsViewState(
+            launchAtLogin: service,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false)
+        )
+
+        state.setLaunchAtLoginEnabled(true)
+
+        #expect(service.preferenceRequests == [true])
+        #expect(service.directSetRequests.isEmpty)
+        #expect(service.migrationCount == 2)
+        #expect(state.isLaunchAtLoginEnabled)
+        #expect(state.launchAtLoginError == nil)
+        #expect(!state.canRetryLaunchAtLoginMigration)
+    }
+
+    @MainActor
+    @Test func launchPromptRetriesStartupMigrationThroughPreferenceTransaction() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            migrationFailures: ["首次迁移失败"]
+        )
+        #expect(throws: PresentationTestFailure.self) {
+            try service.migrateLegacyRegistrationIfNeeded()
+        }
+        let prompt = LaunchAtLoginPromptState(launchAtLogin: service)
+
+        let enabled = prompt.enable()
+
+        #expect(enabled)
+        #expect(service.preferenceRequests == [true])
+        #expect(service.directSetRequests.isEmpty)
+        #expect(service.migrationCount == 2)
+        #expect(prompt.errorDescription == nil)
+    }
+
+    @MainActor
+    @Test func launchPromptPreservesMigrationErrorWhenRetryFails() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            migrationFailures: ["首次迁移失败", "再次迁移失败"]
+        )
+        #expect(throws: PresentationTestFailure.self) {
+            try service.migrateLegacyRegistrationIfNeeded()
+        }
+        let prompt = LaunchAtLoginPromptState(launchAtLogin: service)
+
+        let enabled = prompt.enable()
+
+        #expect(!enabled)
+        #expect(service.preferenceRequests == [true])
+        #expect(service.directSetRequests.isEmpty)
+        #expect(service.migrationCount == 2)
+        #expect(prompt.errorDescription == "再次迁移失败")
+        #expect(service.hasMigrationError)
+    }
+
+    @MainActor
+    @Test func startupLoginItemMigrationErrorIsVisibleAndCanBeRetried() {
+        let service = LaunchAtLoginServiceSpy(
+            enabled: false,
+            migrationFailures: ["无法迁移旧登录项"]
+        )
+        let state = SettingsViewState(
+            launchAtLogin: service,
+            notificationSender: PresentationNotificationSenderSpy(enabled: false)
+        )
+        #expect(throws: PresentationTestFailure.self) {
+            try service.migrateLegacyRegistrationIfNeeded()
+        }
+
+        state.refreshLaunchAtLoginState()
+
+        #expect(state.launchAtLoginError == "无法迁移旧登录项")
+        #expect(state.canRetryLaunchAtLoginMigration)
+
+        state.retryLaunchAtLoginMigration()
+
+        #expect(state.launchAtLoginError == nil)
+        #expect(!state.canRetryLaunchAtLoginMigration)
+        #expect(service.migrationCount == 2)
     }
 
     @MainActor
@@ -119,10 +419,24 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
     private let lock = NSLock()
     private var enabled: Bool
     private var storedEnableFailure: String?
+    private var storedMigrationFailures: [String]
+    private var storedLastErrorDescription: String?
+    private var storedHasMigrationError = false
+    private var recordedMigrationCount = 0
+    private var storedPreferenceResults: [Bool]
+    private var recordedPreferenceRequests: [Bool] = []
+    private var recordedDirectSetRequests: [Bool] = []
 
-    init(enabled: Bool, enableFailure: String? = nil) {
+    init(
+        enabled: Bool,
+        enableFailure: String? = nil,
+        migrationFailures: [String] = [],
+        preferenceResults: [Bool] = []
+    ) {
         self.enabled = enabled
         storedEnableFailure = enableFailure
+        storedMigrationFailures = migrationFailures
+        storedPreferenceResults = preferenceResults
     }
 
     var isEnabled: Bool {
@@ -134,12 +448,65 @@ private final class LaunchAtLoginServiceSpy: @unchecked Sendable, LaunchAtLoginS
         set { lock.withLock { storedEnableFailure = newValue } }
     }
 
+    var lastErrorDescription: String? {
+        lock.withLock { storedLastErrorDescription }
+    }
+
+    var hasMigrationError: Bool {
+        lock.withLock { storedHasMigrationError }
+    }
+
+    var migrationCount: Int {
+        lock.withLock { recordedMigrationCount }
+    }
+
+    var preferenceRequests: [Bool] {
+        lock.withLock { recordedPreferenceRequests }
+    }
+
+    var directSetRequests: [Bool] {
+        lock.withLock { recordedDirectSetRequests }
+    }
+
+    func applyUserPreference(enabled: Bool) throws -> Bool {
+        lock.withLock { recordedPreferenceRequests.append(enabled) }
+        try migrateLegacyRegistrationIfNeeded()
+        return try lock.withLock {
+            if enabled, let storedEnableFailure {
+                storedLastErrorDescription = storedEnableFailure
+                storedHasMigrationError = false
+                throw PresentationTestFailure(message: storedEnableFailure)
+            }
+            self.enabled = storedPreferenceResults.isEmpty
+                ? enabled
+                : storedPreferenceResults.removeFirst()
+            storedLastErrorDescription = nil
+            storedHasMigrationError = false
+            return self.enabled
+        }
+    }
+
     func setEnabled(_ enabled: Bool) throws {
         try lock.withLock {
+            recordedDirectSetRequests.append(enabled)
             if enabled, let storedEnableFailure {
                 throw PresentationTestFailure(message: storedEnableFailure)
             }
             self.enabled = enabled
+        }
+    }
+
+    func migrateLegacyRegistrationIfNeeded() throws {
+        try lock.withLock {
+            recordedMigrationCount += 1
+            if !storedMigrationFailures.isEmpty {
+                let failure = storedMigrationFailures.removeFirst()
+                storedLastErrorDescription = failure
+                storedHasMigrationError = true
+                throw PresentationTestFailure(message: failure)
+            }
+            storedLastErrorDescription = nil
+            storedHasMigrationError = false
         }
     }
 }
